@@ -14,7 +14,6 @@ use maplit::hashmap;
 use yang4::context::{
     Context, ContextFlags, EmbeddedModuleKey, EmbeddedModules,
 };
-use yang4::data::DataNodeRef;
 
 // Global YANG context.
 pub static YANG_CTX: OnceLock<Arc<Context>> = OnceLock::new();
@@ -436,55 +435,6 @@ pub trait ToYangBits {
 pub trait TryFromYang: Sized {
     // Construct value from YANG identity or enum value.
     fn try_from_yang(identity: &str) -> Option<Self>;
-}
-
-// A trait representing YANG objects (containers or lists).
-//
-// This trait is automatically implemented for all structs generated from
-// YANG definitions at build-time.
-pub trait YangObject {
-    // Initialize a given YANG data node with attributes from the current
-    // object.
-    fn into_data_node(self: Box<Self>, dnode: &mut DataNodeRef<'_>);
-
-    // Return the keys of the list, or an empty string for containers or keyless
-    // lists.
-    fn list_keys(&self) -> String {
-        String::new()
-    }
-}
-
-//
-// YANG path type.
-//
-// Instances of this structure are created automatically at build-time, and
-// their use should be preferred over regular strings for extra type safety.
-//
-#[derive(Clone, Copy, Debug)]
-pub struct YangPath(&'static str);
-
-// ===== impl YangPath =====
-
-impl YangPath {
-    pub const fn new(path: &'static str) -> YangPath {
-        YangPath(path)
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        self.0
-    }
-}
-
-impl std::fmt::Display for YangPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for YangPath {
-    fn as_ref(&self) -> &str {
-        self.0
-    }
 }
 
 // ===== global functions =====

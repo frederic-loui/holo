@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use derive_new::new;
 use holo_utils::yang::SchemaNodeExt;
-use holo_yang::YangPath;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use yang4::data::{Data, DataDiff, DataDiffOp, DataNodeRef, DataTree};
@@ -17,7 +16,7 @@ use yang4::schema::{DataValueType, SchemaNode, SchemaNodeKind};
 
 use crate::debug::Debug;
 use crate::error::Error;
-use crate::{NbDaemonSender, ProviderBase, api};
+use crate::{NbDaemonSender, ProviderBase, YangPath, api};
 
 // A generic struct representing an inheritable configuration value.
 //

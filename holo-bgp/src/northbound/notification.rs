@@ -6,9 +6,9 @@
 
 use std::borrow::Cow;
 
-use holo_northbound::notification;
+use holo_northbound::{YangObject, notification};
 use holo_utils::protocol::Protocol;
-use holo_yang::{ToYang, YangObject};
+use holo_yang::ToYang;
 
 use crate::instance::InstanceUpView;
 use crate::neighbor::Neighbor;

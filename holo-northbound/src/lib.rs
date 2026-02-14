@@ -17,8 +17,34 @@ pub mod state;
 pub mod yang_codegen;
 
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use yang4::data::DataNodeRef;
 
 use crate::debug::Debug;
+
+// A trait representing YANG objects (containers or lists).
+//
+// This trait is automatically implemented for all structs generated from
+// YANG definitions at build-time.
+pub trait YangObject {
+    // Initialize a given YANG data node with attributes from the current
+    // object.
+    fn into_data_node(self: Box<Self>, dnode: &mut DataNodeRef<'_>);
+
+    // Return the keys of the list, or an empty string for containers or keyless
+    // lists.
+    fn list_keys(&self) -> String {
+        String::new()
+    }
+}
+
+//
+// YANG path type.
+//
+// Instances of this structure are created automatically at build-time, and
+// their use should be preferred over regular strings for extra type safety.
+//
+#[derive(Clone, Copy, Debug)]
+pub struct YangPath(&'static str);
 
 //
 // Useful type definitions.
@@ -34,6 +60,26 @@ where
     Self: 'static + Sized,
 {
     fn top_level_node(&self) -> String;
+}
+
+// ===== impl YangPath =====
+
+impl YangPath {
+    pub const fn new(path: &'static str) -> YangPath {
+        YangPath(path)
+    }
+}
+
+impl std::fmt::Display for YangPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl AsRef<str> for YangPath {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
 }
 
 // ===== helper functions =====

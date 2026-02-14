@@ -28,7 +28,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 use holo_northbound::yang_codegen::yang;
-use holo_yang::{YangObject, YangPath, YANG_CTX};
+use holo_northbound::{YangObject, YangPath};
+use holo_yang::YANG_CTX;
 use yang4::data::DataNodeRef;
 use yang4::schema::SchemaModule;
 

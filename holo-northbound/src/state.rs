@@ -7,13 +7,13 @@
 use std::fmt::Write;
 
 use holo_utils::yang::SchemaNodeExt;
-use holo_yang::{YANG_CTX, YangObject};
+use holo_yang::YANG_CTX;
 use tokio::sync::oneshot;
 use yang4::data::{DataNodeRef, DataTree};
 use yang4::schema::{SchemaNode, SchemaNodeKind};
 
 use crate::error::Error;
-use crate::{NbDaemonSender, ProviderBase, api};
+use crate::{NbDaemonSender, ProviderBase, YangObject, api};
 
 // Northbound data provider.
 pub trait Provider: ProviderBase {
