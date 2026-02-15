@@ -34,14 +34,12 @@ where
     let data = IfStateChange {
         routing_protocol_name: Some(instance.name.into()),
         address_family: Some(instance.state.af.to_yang()),
-        interface: (!iface.is_virtual_link()).then_some(Box::new(Interface {
+        interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
-        })),
-        virtual_link: iface.vlink_key.map(|vlink_key| {
-            Box::new(VirtualLink {
-                transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
-                neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
-            })
+        }),
+        virtual_link: iface.vlink_key.map(|vlink_key| VirtualLink {
+            transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
+            neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
         }),
         state: Some(iface.state.ism_state.to_yang()),
     };
@@ -58,9 +56,9 @@ where
     let data = IfConfigError {
         routing_protocol_name: Some(instance.name.into()),
         address_family: Some(instance.state.af.to_yang()),
-        interface: Some(Box::new(Interface {
+        interface: Some(Interface {
             interface: Some(ifname.into()),
-        })),
+        }),
         virtual_link: None,
         packet_source: Some(Cow::Owned((*src).into())),
         packet_type: Some(pkt_type.to_yang()),
@@ -80,14 +78,12 @@ where
     let data = NbrStateChange {
         routing_protocol_name: Some(instance.name.into()),
         address_family: Some(instance.state.af.to_yang()),
-        interface: (!iface.is_virtual_link()).then_some(Box::new(Interface {
+        interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
-        })),
-        virtual_link: iface.vlink_key.map(|vlink_key| {
-            Box::new(VirtualLink {
-                transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
-                neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
-            })
+        }),
+        virtual_link: iface.vlink_key.map(|vlink_key| VirtualLink {
+            transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
+            neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
         }),
         neighbor_router_id: Some(Cow::Borrowed(&nbr.router_id)),
         neighbor_ip_addr: Some(Cow::Owned(nbr.src.into())),
@@ -107,14 +103,12 @@ where
     let data = NbrRestartHelperStatusChange {
         routing_protocol_name: Some(instance.name.into()),
         address_family: Some(instance.state.af.to_yang()),
-        interface: (!iface.is_virtual_link()).then_some(Box::new(Interface {
+        interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
-        })),
-        virtual_link: iface.vlink_key.map(|vlink_key| {
-            Box::new(VirtualLink {
-                transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
-                neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
-            })
+        }),
+        virtual_link: iface.vlink_key.map(|vlink_key| VirtualLink {
+            transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
+            neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
         }),
         neighbor_router_id: Some(Cow::Borrowed(&nbr.router_id)),
         neighbor_ip_addr: Some(Cow::Owned(nbr.src.into())),
@@ -136,14 +130,12 @@ where
     let data = NbrRestartHelperStatusChange {
         routing_protocol_name: Some(instance.name.into()),
         address_family: Some(instance.state.af.to_yang()),
-        interface: (!iface.is_virtual_link()).then_some(Box::new(Interface {
+        interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
-        })),
-        virtual_link: iface.vlink_key.map(|vlink_key| {
-            Box::new(VirtualLink {
-                transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
-                neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
-            })
+        }),
+        virtual_link: iface.vlink_key.map(|vlink_key| VirtualLink {
+            transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
+            neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
         }),
         neighbor_router_id: Some(Cow::Borrowed(&nbr.router_id)),
         neighbor_ip_addr: Some(Cow::Owned(nbr.src.into())),
@@ -165,14 +157,12 @@ where
     let data = IfRxBadPacket {
         routing_protocol_name: Some(instance.name.into()),
         address_family: Some(instance.state.af.to_yang()),
-        interface: (!iface.is_virtual_link()).then_some(Box::new(Interface {
+        interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
-        })),
-        virtual_link: iface.vlink_key.map(|vlink_key| {
-            Box::new(VirtualLink {
-                transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
-                neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
-            })
+        }),
+        virtual_link: iface.vlink_key.map(|vlink_key| VirtualLink {
+            transit_area_id: Some(Cow::Owned(vlink_key.transit_area_id)),
+            neighbor_router_id: Some(Cow::Owned(vlink_key.router_id)),
         }),
         packet_source: Some(Cow::Owned(src.into())),
         // TODO: set the packet-type whenever possible.

@@ -25,15 +25,33 @@ use crate::debug::Debug;
 //
 // This trait is automatically implemented for all structs generated from
 // YANG definitions at build-time.
-pub trait YangObject {
+pub trait YangObject: YangObjectDyn {
     // Initialize a given YANG data node with attributes from the current
     // object.
-    fn into_data_node(self: Box<Self>, dnode: &mut DataNodeRef<'_>);
+    fn into_data_node(self, dnode: &mut DataNodeRef<'_>)
+    where
+        Self: Sized;
 
     // Return the keys of the list, or an empty string for containers or keyless
     // lists.
     fn list_keys(&self) -> String {
         String::new()
+    }
+}
+
+// A bridge trait that enables dynamic dispatch for [YangObject].
+pub trait YangObjectDyn {
+    // Initialize a given YANG data node with attributes from the current
+    // object.
+    fn into_data_node(self: Box<Self>, dnode: &mut DataNodeRef<'_>);
+}
+
+// Blanket implementation that provides dynamic dispatch support to any type
+// implementing [YangObject].
+impl<T: YangObject> YangObjectDyn for T {
+    fn into_data_node(self: Box<Self>, dnode: &mut DataNodeRef<'_>) {
+        // T is Sized here, so we unbox and call the concrete implementation.
+        (*self).into_data_node(dnode);
     }
 }
 

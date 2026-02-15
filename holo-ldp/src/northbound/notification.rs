@@ -22,11 +22,11 @@ pub(crate) fn mpls_ldp_peer_event(nb_tx: &NbProviderSender, instance_name: &str,
     let event_type = event_type(nbr.is_operational());
     let data = MplsLdpPeerEvent {
         event_type: Some(event_type.into()),
-        peer: Some(Box::new(Peer {
+        peer: Some(Peer {
             protocol_name: Some(instance_name.into()),
             lsr_id: Some(Cow::Owned(nbr.lsr_id)),
             label_space_id: None,
-        })),
+        }),
     };
     notification::send(nb_tx, mpls_ldp_peer_event::PATH, data);
 }
@@ -40,14 +40,12 @@ pub(crate) fn mpls_ldp_hello_adjacency_event(nb_tx: &NbProviderSender, instance_
     let data = MplsLdpHelloAdjacencyEvent {
         protocol_name: Some(instance_name.into()),
         event_type: Some(event_type.into()),
-        targeted: ifname.is_none().then_some(Box::new(Targeted {
+        targeted: ifname.is_none().then_some(Targeted {
             target_address: Some(Cow::Borrowed(addr)),
-        })),
-        link: ifname.map(|ifname| {
-            Box::new(Link {
-                next_hop_interface: Some(ifname.into()),
-                next_hop_address: Some(Cow::Borrowed(addr)),
-            })
+        }),
+        link: ifname.map(|ifname| Link {
+            next_hop_interface: Some(ifname.into()),
+            next_hop_address: Some(Cow::Borrowed(addr)),
         }),
     };
     notification::send(nb_tx, mpls_ldp_hello_adjacency_event::PATH, data);
