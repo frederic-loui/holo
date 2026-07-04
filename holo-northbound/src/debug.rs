@@ -7,13 +7,12 @@
 use tracing::{trace, trace_span};
 
 use crate::api;
-use crate::configuration::{CallbackOp, CommitPhase};
+use crate::configuration::{ChangeOp, CommitPhase};
 
 #[derive(Debug)]
 pub enum Debug<'a> {
     RequestRx(&'a api::daemon::Request),
-    ValidationCallback(&'a str),
-    ConfigurationCallback(CommitPhase, CallbackOp, &'a str),
+    ConfigurationChange(CommitPhase, ChangeOp, &'a str),
 }
 
 // ===== impl Debug =====
@@ -26,12 +25,7 @@ impl Debug<'_> {
                     trace!(?message, "{}", self);
                 });
             }
-            Debug::ValidationCallback(path) => {
-                trace_span!("northbound").in_scope(|| {
-                    trace!(%path, "{}", self);
-                });
-            }
-            Debug::ConfigurationCallback(phase, operation, path) => {
+            Debug::ConfigurationChange(phase, operation, path) => {
                 trace_span!("northbound").in_scope(|| {
                     trace!(
                         ?phase, ?operation, %path,
@@ -49,11 +43,8 @@ impl std::fmt::Display for Debug<'_> {
             Debug::RequestRx(..) => {
                 write!(f, "received request")
             }
-            Debug::ValidationCallback(..) => {
-                write!(f, "validation callback")
-            }
-            Debug::ConfigurationCallback(..) => {
-                write!(f, "configuration callback")
+            Debug::ConfigurationChange(..) => {
+                write!(f, "configuration change")
             }
         }
     }

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use derive_new::new;
 use holo_northbound as northbound;
 use holo_northbound::configuration::{
-    CallbackKey, CallbackOp, CommitPhase, ConfigChange, ValidationCallbacks,
+    CommitPhase, ConfigChange, Provider, ValidateFn,
 };
 use holo_northbound::{NbDaemonSender, NbProviderReceiver, Path, api as papi};
 use holo_protocol::InstanceShared;
@@ -23,9 +23,7 @@ use holo_yang as yang;
 use holo_yang::YANG_CTX;
 use pickledb::PickleDb;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{
-    Receiver, Sender, UnboundedReceiver, UnboundedSender, WeakSender,
-};
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, instrument, trace, warn};
 use yang5::data::{
@@ -42,10 +40,10 @@ pub struct Northbound {
     running_config: Arc<DataTree<'static>>,
     // Non-volatile storage.
     db: Database,
-    // Validation callbacks.
-    validation_callbacks: Vec<&'static ValidationCallbacks>,
-    // Callback keys from the data providers.
-    callbacks: BTreeMap<CallbackKey, WeakSender<papi::daemon::Request>>,
+    // Validation functions.
+    validation_fns: Vec<ValidateFn>,
+    // Maps each configuration node to the index of its data provider.
+    provider_paths: HashMap<String, usize>,
     // List of management interfaces.
     clients: Vec<Task<()>>,
     // List of data providers.
@@ -121,21 +119,17 @@ impl Northbound {
         let (rx_clients, clients) = start_clients(config);
 
         // Start provider tasks (e.g. interfaces, routing, etc).
-        let (rx_providers, providers) = start_providers(config, db.clone());
+        let (rx_providers, providers, registered_paths, validation_fns) =
+            start_providers(config, db.clone());
 
-        // Load validation callbacks.
-        let validation_callbacks = validation_callbacks();
-
-        // Load callbacks keys from data providers and check for missing
-        // callbacks.
-        let callbacks = load_callbacks(&providers).await;
-        validate_callbacks(&callbacks);
+        // Resolve the data provider that owns each configuration node.
+        let provider_paths = resolve_provider_paths(&registered_paths);
 
         Northbound {
             running_config,
             db,
-            validation_callbacks,
-            callbacks,
+            validation_fns,
+            provider_paths,
             clients,
             providers,
             rx_clients,
@@ -260,11 +254,8 @@ impl Northbound {
         let candidate = Arc::new(candidate);
 
         // Validate the candidate configuration.
-        northbound::configuration::validate(
-            &self.validation_callbacks,
-            &candidate,
-        )
-        .map_err(Error::TransactionValidation)?;
+        northbound::configuration::validate(&self.validation_fns, &candidate)
+            .map_err(Error::TransactionValidation)?;
 
         Ok(capi::client::ValidateResponse {})
     }
@@ -399,11 +390,8 @@ impl Northbound {
         let candidate = Arc::new(candidate);
 
         // Validate the candidate configuration.
-        northbound::configuration::validate(
-            &self.validation_callbacks,
-            &candidate,
-        )
-        .map_err(Error::TransactionValidation)?;
+        northbound::configuration::validate(&self.validation_fns, &candidate)
+            .map_err(Error::TransactionValidation)?;
 
         // Compute diff between the running config and the candidate config.
         let diff = self
@@ -498,21 +486,18 @@ impl Northbound {
         candidate: &Arc<DataTree<'static>>,
         changes: &[ConfigChange],
     ) -> std::result::Result<(), northbound::error::Error> {
-        // Spawn one task per data provider.
-        for daemon_tx in self.providers.iter() {
-            // Batch all changes that should be sent to this provider.
-            let changes = changes
-                .iter()
-                .filter(|(cb_key, _)| {
-                    if let Some(tx) = self.callbacks.get(cb_key) {
-                        tx.upgrade().unwrap().same_channel(daemon_tx)
-                    } else {
-                        false
-                    }
-                })
-                .cloned()
-                .collect();
+        // Batch the changes that should be sent to each data provider.
+        let mut batches = vec![Vec::new(); self.providers.len()];
+        for (change_key, data_path) in changes {
+            if let Some(index) = self.provider_paths.get(&change_key.path)
+                && let Some(batch) = batches.get_mut(*index)
+            {
+                batch.push((change_key.clone(), data_path.clone()));
+            }
+        }
 
+        // Spawn one task per data provider.
+        for (daemon_tx, changes) in self.providers.iter().zip(batches) {
             // Prepare request.
             let (responder_tx, responder_rx) = oneshot::channel();
             let request =
@@ -670,8 +655,15 @@ impl Default for ConfirmedCommit {
 fn start_providers(
     config: &Config,
     db: Database,
-) -> (NbProviderReceiver, Vec<NbDaemonSender>) {
+) -> (
+    NbProviderReceiver,
+    Vec<NbDaemonSender>,
+    HashMap<String, usize>,
+    Vec<ValidateFn>,
+) {
     let mut providers = Vec::new();
+    let mut registered_paths = HashMap::new();
+    let mut validation_fns = Vec::new();
     let (provider_tx, provider_rx) = mpsc::unbounded_channel();
     let (ibus_tx, ibus_rx) = ibus::ibus_channels();
     let shared = InstanceShared {
@@ -689,6 +681,11 @@ fn start_providers(
             ibus_rx.interface,
             shared.clone(),
         );
+        register_provider::<holo_interface::Master>(
+            providers.len(),
+            &mut registered_paths,
+            &mut validation_fns,
+        );
         providers.push(daemon_tx);
     }
 
@@ -700,6 +697,11 @@ fn start_providers(
             &ibus_tx,
             ibus_rx.keychain,
         );
+        register_provider::<holo_keychain::Master>(
+            providers.len(),
+            &mut registered_paths,
+            &mut validation_fns,
+        );
         providers.push(daemon_tx);
     }
 
@@ -708,6 +710,11 @@ fn start_providers(
     {
         let daemon_tx =
             holo_policy::start(provider_tx.clone(), &ibus_tx, ibus_rx.policy);
+        register_provider::<holo_policy::Master>(
+            providers.len(),
+            &mut registered_paths,
+            &mut validation_fns,
+        );
         providers.push(daemon_tx);
     }
 
@@ -716,6 +723,11 @@ fn start_providers(
     {
         let daemon_tx =
             holo_system::start(provider_tx.clone(), &ibus_tx, ibus_rx.system);
+        register_provider::<holo_system::Master>(
+            providers.len(),
+            &mut registered_paths,
+            &mut validation_fns,
+        );
         providers.push(daemon_tx);
     }
 
@@ -724,10 +736,15 @@ fn start_providers(
     {
         let daemon_tx =
             holo_routing::start(provider_tx, &ibus_tx, ibus_rx.routing, shared);
+        register_provider::<holo_routing::Master>(
+            providers.len(),
+            &mut registered_paths,
+            &mut validation_fns,
+        );
         providers.push(daemon_tx);
     }
 
-    (provider_rx, providers)
+    (provider_rx, providers, registered_paths, validation_fns)
 }
 
 // Starts external clients.
@@ -754,110 +771,44 @@ fn start_clients(
     (daemon_rx, clients)
 }
 
-// Loads all validation callbacks from all data providers.
-fn validation_callbacks() -> Vec<&'static ValidationCallbacks> {
-    vec![
-        #[cfg(feature = "interface")]
-        &holo_interface::northbound::configuration::VALIDATION_CALLBACKS,
-        #[cfg(feature = "routing")]
-        &holo_routing::northbound::configuration::VALIDATION_CALLBACKS,
-        #[cfg(feature = "bfd")]
-        &holo_bfd::northbound::configuration::VALIDATION_CALLBACKS,
-        #[cfg(feature = "bgp")]
-        &holo_bgp::northbound::configuration::VALIDATION_CALLBACKS,
-        #[cfg(feature = "igmp")]
-        &holo_igmp::northbound::configuration::VALIDATION_CALLBACKS,
-        #[cfg(feature = "isis")]
-        &holo_isis::northbound::configuration::VALIDATION_CALLBACKS,
-        #[cfg(feature = "ldp")]
-        &holo_ldp::northbound::configuration::VALIDATION_CALLBACKS,
-        #[cfg(feature = "ospf")]
-        &holo_ospf::northbound::configuration::VALIDATION_CALLBACKS_OSPFV2,
-        #[cfg(feature = "ospf")]
-        &holo_ospf::northbound::configuration::VALIDATION_CALLBACKS_OSPFV3,
-        #[cfg(feature = "rip")]
-        &holo_rip::northbound::configuration::VALIDATION_CALLBACKS_RIPV2,
-        #[cfg(feature = "rip")]
-        &holo_rip::northbound::configuration::VALIDATION_CALLBACKS_RIPNG,
-    ]
-}
-
-// Loads all YANG callback keys from the data providers.
-async fn load_callbacks(
-    providers: &[NbDaemonSender],
-) -> BTreeMap<CallbackKey, WeakSender<papi::daemon::Request>> {
-    let mut callbacks = BTreeMap::new();
-
-    for provider_tx in providers.iter() {
-        // Prepare request.
-        let (responder_tx, responder_rx) = oneshot::channel();
-        let request = papi::daemon::Request::GetCallbacks(
-            papi::daemon::GetCallbacksRequest {
-                responder: Some(responder_tx),
-            },
-        );
-        provider_tx.send(request).await.unwrap();
-
-        // Receive response.
-        let provider_response = responder_rx.await.unwrap();
-
-        // Validate and store callback key.
-        for cb_key in provider_response.callbacks {
-            validate_callback(&cb_key);
-            callbacks.insert(cb_key, provider_tx.downgrade());
-        }
-    }
-
-    callbacks
-}
-
-// Checks for missing YANG callbacks.
-fn validate_callbacks(
-    callbacks: &BTreeMap<CallbackKey, WeakSender<papi::daemon::Request>>,
+// Registers the YANG paths and validation functions of a data provider.
+fn register_provider<P: Provider>(
+    index: usize,
+    registered_paths: &mut HashMap<String, usize>,
+    validation_fns: &mut Vec<ValidateFn>,
 ) {
-    let yang_ctx = YANG_CTX.get().unwrap();
-    let mut errors: usize = 0;
+    for path in P::YANG_OPS_CONFIG.paths() {
+        registered_paths.insert(path.to_owned(), index);
+    }
 
-    for snode in yang_ctx
-        .traverse()
-        .filter(|snode| snode.module().is_implemented())
-        .filter(|snode| snode.module().name() != "yang")
-        .filter(|snode| snode.module().name() != "ietf-yang-schema-mount")
-        .filter(|snode| snode.is_status_current())
-    {
+    validation_fns.extend(P::validation_fns());
+}
+
+// Maps each configuration node to the data provider that owns it.
+//
+// Nodes owned by nested providers (e.g. routing protocol instances) are mapped
+// to the provider owning their closest registered ancestor, which relays the
+// configuration to the appropriate child instance.
+fn resolve_provider_paths(
+    registered_paths: &HashMap<String, usize>,
+) -> HashMap<String, usize> {
+    let yang_ctx = YANG_CTX.get().unwrap();
+    let mut provider_paths = HashMap::new();
+
+    for snode in yang_ctx.traverse().filter(|snode| snode.is_config()) {
         let path = snode.data_path();
-        for operation in [
-            CallbackOp::Create,
-            CallbackOp::Modify,
-            CallbackOp::Delete,
-            CallbackOp::Lookup,
-        ] {
-            if operation.is_valid(&snode) {
-                let cb_key = CallbackKey::new(path.clone(), operation);
-                if callbacks.get(&cb_key).is_none() {
-                    error!(?operation, path = %cb_key.path, "missing callback");
-                    errors += 1;
-                }
+        let mut ancestor = path.as_str();
+        loop {
+            if let Some(index) = registered_paths.get(ancestor) {
+                provider_paths.insert(path.clone(), *index);
+                break;
             }
+            let Some(index) = ancestor.rfind('/') else {
+                break;
+            };
+            ancestor = &ancestor[..index];
         }
     }
 
-    if errors > 0 {
-        error!(%errors, "failed to validate northbound callbacks");
-        std::process::exit(1);
-    }
-}
-
-// Checks whether the callback key is valid.
-fn validate_callback(callback: &CallbackKey) {
-    let yang_ctx = YANG_CTX.get().unwrap();
-
-    if let Ok(snode) = yang_ctx.find_path(&callback.path)
-        && !callback.operation.is_valid(&snode)
-    {
-        error!(xpath = %callback.path, operation = ?callback.operation,
-            "invalid callback",
-        );
-        std::process::exit(1);
-    }
+    provider_paths
 }

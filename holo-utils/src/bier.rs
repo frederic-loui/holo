@@ -251,7 +251,7 @@ pub enum BierEncapsulationType {
     Ethernet,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[derive(Deserialize, Serialize)]
 pub enum UnderlayProtocolType {
     IsIs,

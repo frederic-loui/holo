@@ -4,19 +4,22 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use derive_new::new;
 use holo_utils::yang::SchemaNodeExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tracing::error;
 use yang5::data::{Data, DataDiff, DataDiffOp, DataNodeRef, DataTree};
 use yang5::schema::{DataValueType, SchemaNode, SchemaNodeKind};
 
 use crate::debug::Debug;
-use crate::error::Error;
-use crate::{NbDaemonSender, YangPath, api};
+use crate::error::{
+    ApplyError, Error, ParseError, PrepareError, ValidationError,
+};
+use crate::{NbDaemonSender, api};
 
 // A generic struct representing an inheritable configuration value.
 //
@@ -37,104 +40,131 @@ pub enum CommitPhase {
 }
 
 //
-// Commit callbacks.
+// Configuration changes.
 //
 
-/// YANG callback operation.
+/// Operation carried by a configuration change.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[derive(Deserialize, Serialize)]
-pub enum CallbackOp {
+pub enum ChangeOp {
     Create,
     Modify,
     Delete,
-    Lookup,
 }
 
-/// YANG callback key.
+/// Operation carried by typed configuration changes whose nodes can only be
+/// created or deleted (lists, leaf-lists, presence containers and leaves of
+/// type empty).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigOp {
+    Create,
+    Delete,
+}
+
+// Static dispatch table generated from the YANG models, mapping each
+// configuration node to a parser that converts a data node into a typed
+// configuration change.
+pub struct YangConfigOps<C: 'static> {
+    pub parse: phf::Map<&'static str, ConfigChangeParseFn<C>>,
+    pub change_keys: &'static [(&'static str, ChangeOp)],
+}
+
+impl<C> YangConfigOps<C> {
+    // Returns the YANG paths of all configuration nodes owned by this
+    // dispatch table.
+    pub fn paths(&self) -> impl Iterator<Item = &'static str> {
+        self.change_keys.iter().map(|(path, _)| *path)
+    }
+}
+
+/// Configuration change parsed during the Prepare phase of a transaction,
+/// together with the resource allocated for it. Kept by the provider task
+/// until the transaction is aborted or applied, so that each change is parsed
+/// only once.
+pub struct PendingChange<P: Provider> {
+    key: ChangeKey,
+    data_path: String,
+    change: P::Change,
+    resource: Option<P::Resource>,
+}
+
+/// Key identifying a configuration change.
 #[derive(Clone, Debug, Eq, Hash, new, Ord, PartialEq, PartialOrd)]
 #[derive(Deserialize, Serialize)]
-pub struct CallbackKey {
+pub struct ChangeKey {
     pub path: String,
-    pub operation: CallbackOp,
-}
-
-pub struct Callbacks<P: Provider>(pub HashMap<CallbackKey, CallbacksNode<P>>);
-
-pub struct CallbacksNode<P: Provider> {
-    pub lookup: Option<CallbackLookup<P>>,
-    pub prepare: Option<CallbackPhaseOne<P>>,
-    pub abort: Option<CallbackPhaseTwo<P>>,
-    pub apply: Option<CallbackPhaseTwo<P>>,
-}
-
-pub struct CallbacksBuilder<P: Provider> {
-    path: Option<YangPath>,
-    callbacks: Callbacks<P>,
-}
-
-#[derive(Debug)]
-pub struct CallbackArgs<'a, P: Provider> {
-    pub event_queue: &'a mut BTreeSet<P::Event>,
-    pub list_entry: P::ListEntry,
-    pub resource: &'a mut Option<P::Resource>,
-    pub old_config: &'a Arc<DataTree<'static>>,
-    pub new_config: &'a Arc<DataTree<'static>>,
-    pub dnode: DataNodeRef<'a>,
-}
-
-//
-// Validation callbacks.
-//
-
-#[derive(Default)]
-pub struct ValidationCallbacks(pub HashMap<String, ValidationCallback>);
-
-#[derive(Default)]
-pub struct ValidationCallbacksBuilder {
-    path: Option<YangPath>,
-    callbacks: ValidationCallbacks,
-}
-
-#[derive(Debug)]
-pub struct ValidationCallbackArgs<'a> {
-    pub dnode: DataNodeRef<'a>,
+    pub operation: ChangeOp,
 }
 
 //
 // Useful type definition(s).
 //
 
-pub type ConfigChange = (CallbackKey, String);
+pub type ConfigChange = (ChangeKey, String);
 pub type ConfigChanges = Vec<ConfigChange>;
-
-pub type CallbackLookup<P: Provider> = for<'a> fn(
-    &'a mut P,
-    list_entry: P::ListEntry,
-    dnode: DataNodeRef<'a>,
-) -> P::ListEntry;
-
-pub type CallbackPhaseOne<P> =
-    for<'a> fn(&'a mut P, CallbackArgs<'a, P>) -> Result<(), String>;
-
-pub type CallbackPhaseTwo<P> = for<'a> fn(&'a mut P, CallbackArgs<'a, P>);
-
-pub type ValidationCallback =
-    fn(ValidationCallbackArgs<'_>) -> Result<(), String>;
+pub type ConfigChangeParseFn<C> =
+    fn(ChangeOp, &DataNodeRef<'_>) -> Result<C, ParseError>;
+pub type ValidateFn = fn(&DataTree<'static>) -> Result<(), ValidationError>;
 
 //
 // Provider northbound.
 //
 
 pub trait Provider: 'static + Sized {
-    type ListEntry: Default;
     type Event;
     type Resource: Send;
+    type Change: Send;
 
-    fn callbacks() -> &'static Callbacks<Self>;
+    // Generated dispatch table for typed configuration changes.
+    const YANG_OPS_CONFIG: YangConfigOps<Self::Change>;
 
-    fn nested_callbacks() -> Option<Vec<CallbackKey>> {
-        None
+    // Returns the configuration validation functions of the provider and its
+    // nested providers. Each function should validate all configuration
+    // subsections owned by the corresponding crate, returning an error message
+    // when the configuration is invalid.
+    fn validation_fns() -> Vec<ValidateFn> {
+        vec![]
     }
+
+    // Invoked during the Prepare phase for each typed configuration change.
+    // May allocate the resources required by the change, rejecting the commit
+    // when the allocation fails. Configuration errors are rejected earlier, by
+    // the validation functions.
+    //
+    // The change is passed by reference since it's consumed later, during the
+    // Abort or Apply phase.
+    fn prepare(
+        &mut self,
+        _change: &Self::Change,
+        _resource: &mut Option<Self::Resource>,
+        _event_queue: &mut BTreeSet<Self::Event>,
+    ) -> Result<(), PrepareError> {
+        Ok(())
+    }
+
+    // Invoked during the Abort phase for each typed configuration change,
+    // releasing resources allocated during the Prepare phase.
+    fn abort(
+        &mut self,
+        _change: Self::Change,
+        _resource: &mut Option<Self::Resource>,
+    ) {
+    }
+
+    // Invoked during the Apply phase for each typed configuration change.
+    // Returns an error when the change references a configuration entry that
+    // unexpectedly does not exist; the change is skipped and the error is
+    // logged together with the corresponding YANG data path.
+    fn apply(
+        &mut self,
+        _change: Self::Change,
+        _resource: &mut Option<Self::Resource>,
+        _event_queue: &mut BTreeSet<Self::Event>,
+    ) -> Result<(), ApplyError> {
+        Ok(())
+    }
+
+    fn process_event(&mut self, _event: Self::Event) {}
 
     fn relay_changes(
         &self,
@@ -142,8 +172,6 @@ pub trait Provider: 'static + Sized {
     ) -> Vec<(ConfigChanges, NbDaemonSender)> {
         vec![]
     }
-
-    fn process_event(&mut self, _event: Self::Event) {}
 }
 
 // ===== impl InheritableConfig =====
@@ -157,15 +185,14 @@ impl<T> InheritableConfig<T> {
     }
 }
 
-// ===== impl CallbackOp =====
+// ===== impl ChangeOp =====
 
-impl CallbackOp {
+impl ChangeOp {
     pub fn is_valid(&self, snode: &SchemaNode<'_>) -> bool {
         match self {
-            CallbackOp::Create => CallbackOp::create_is_valid(snode),
-            CallbackOp::Modify => CallbackOp::modify_is_valid(snode),
-            CallbackOp::Delete => CallbackOp::delete_is_valid(snode),
-            CallbackOp::Lookup => CallbackOp::lookup_is_valid(snode),
+            ChangeOp::Create => ChangeOp::create_is_valid(snode),
+            ChangeOp::Modify => ChangeOp::modify_is_valid(snode),
+            ChangeOp::Delete => ChangeOp::delete_is_valid(snode),
         }
     }
 
@@ -233,310 +260,66 @@ impl CallbackOp {
             _ => false,
         }
     }
-
-    fn lookup_is_valid(snode: &SchemaNode<'_>) -> bool {
-        if !snode.is_config() {
-            return false;
-        }
-
-        snode.kind() == SchemaNodeKind::List
-    }
-}
-
-// ===== impl Callbacks =====
-
-impl<P> Callbacks<P>
-where
-    P: Provider,
-{
-    fn get_lookup(&self, path: String) -> Option<&CallbackLookup<P>> {
-        let key = CallbackKey::new(path, CallbackOp::Lookup);
-        self.0.get(&key).and_then(|cb_node| cb_node.lookup.as_ref())
-    }
-
-    fn get_prepare(&self, key: &CallbackKey) -> Option<&CallbackPhaseOne<P>> {
-        self.0.get(key).unwrap().prepare.as_ref()
-    }
-
-    fn get_abort(&self, key: &CallbackKey) -> Option<&CallbackPhaseTwo<P>> {
-        self.0.get(key).unwrap().abort.as_ref()
-    }
-
-    fn get_apply(&self, key: &CallbackKey) -> Option<&CallbackPhaseTwo<P>> {
-        self.0.get(key).unwrap().apply.as_ref()
-    }
-
-    pub fn keys(&self) -> Vec<CallbackKey> {
-        self.0.keys().cloned().collect()
-    }
-}
-
-impl<P> Default for Callbacks<P>
-where
-    P: Provider,
-{
-    fn default() -> Self {
-        Callbacks(HashMap::new())
-    }
-}
-
-// ===== impl CallbacksNode =====
-
-impl<P> Default for CallbacksNode<P>
-where
-    P: Provider,
-{
-    fn default() -> Self {
-        CallbacksNode {
-            lookup: None,
-            prepare: None,
-            abort: None,
-            apply: None,
-        }
-    }
-}
-
-// ===== impl CallbacksBuilder =====
-
-impl<P> CallbacksBuilder<P>
-where
-    P: Provider,
-{
-    pub fn new(callbacks: Callbacks<P>) -> Self {
-        CallbacksBuilder {
-            path: None,
-            callbacks,
-        }
-    }
-
-    #[must_use]
-    pub fn path(mut self, path: YangPath) -> Self {
-        self.path = Some(path);
-        self
-    }
-
-    #[must_use]
-    fn load_prepare(
-        mut self,
-        operation: CallbackOp,
-        cb: CallbackPhaseOne<P>,
-    ) -> Self {
-        let path = self.path.unwrap().to_string();
-        let key = CallbackKey::new(path, operation);
-        self.callbacks.0.entry(key).or_default().prepare = Some(cb);
-        self
-    }
-
-    #[must_use]
-    fn load_abort(
-        mut self,
-        operation: CallbackOp,
-        cb: CallbackPhaseTwo<P>,
-    ) -> Self {
-        let path = self.path.unwrap().to_string();
-        let key = CallbackKey::new(path, operation);
-        self.callbacks.0.entry(key).or_default().abort = Some(cb);
-        self
-    }
-
-    #[must_use]
-    fn load_apply(
-        mut self,
-        operation: CallbackOp,
-        cb: CallbackPhaseTwo<P>,
-    ) -> Self {
-        let path = self.path.unwrap().to_string();
-        let key = CallbackKey::new(path, operation);
-        self.callbacks.0.entry(key).or_default().apply = Some(cb);
-        self
-    }
-
-    #[must_use]
-    pub fn lookup(mut self, cb: CallbackLookup<P>) -> Self {
-        let path = self.path.unwrap().to_string();
-        let key = CallbackKey::new(path, CallbackOp::Lookup);
-        self.callbacks.0.entry(key).or_default().lookup = Some(cb);
-        self
-    }
-
-    #[must_use]
-    pub fn create_prepare(self, cb: CallbackPhaseOne<P>) -> Self {
-        self.load_prepare(CallbackOp::Create, cb)
-    }
-
-    #[must_use]
-    pub fn create_abort(self, cb: CallbackPhaseTwo<P>) -> Self {
-        self.load_abort(CallbackOp::Create, cb)
-    }
-
-    #[must_use]
-    pub fn create_apply(self, cb: CallbackPhaseTwo<P>) -> Self {
-        self.load_apply(CallbackOp::Create, cb)
-    }
-
-    #[must_use]
-    pub fn delete_prepare(self, cb: CallbackPhaseOne<P>) -> Self {
-        self.load_prepare(CallbackOp::Delete, cb)
-    }
-
-    #[must_use]
-    pub fn delete_abort(self, cb: CallbackPhaseTwo<P>) -> Self {
-        self.load_abort(CallbackOp::Delete, cb)
-    }
-
-    #[must_use]
-    pub fn delete_apply(self, cb: CallbackPhaseTwo<P>) -> Self {
-        self.load_apply(CallbackOp::Delete, cb)
-    }
-
-    #[must_use]
-    pub fn modify_prepare(self, cb: CallbackPhaseOne<P>) -> Self {
-        self.load_prepare(CallbackOp::Modify, cb)
-    }
-
-    #[must_use]
-    pub fn modify_abort(self, cb: CallbackPhaseTwo<P>) -> Self {
-        self.load_abort(CallbackOp::Modify, cb)
-    }
-
-    #[must_use]
-    pub fn modify_apply(self, cb: CallbackPhaseTwo<P>) -> Self {
-        self.load_apply(CallbackOp::Modify, cb)
-    }
-
-    #[must_use]
-    pub fn build(self) -> Callbacks<P> {
-        self.callbacks
-    }
-}
-
-impl<P> Default for CallbacksBuilder<P>
-where
-    P: Provider,
-{
-    fn default() -> Self {
-        CallbacksBuilder {
-            path: None,
-            callbacks: Callbacks::default(),
-        }
-    }
-}
-
-// ===== impl ValidationCallbacks =====
-
-impl ValidationCallbacks {
-    pub fn load(&mut self, path: YangPath, cb: ValidationCallback) {
-        let path = path.to_string();
-        self.0.insert(path, cb);
-    }
-
-    pub fn keys(&self) -> Vec<String> {
-        self.0.keys().cloned().collect()
-    }
-}
-
-// ===== impl ValidationCallbacksBuilder =====
-
-impl ValidationCallbacksBuilder {
-    pub fn new(callbacks: ValidationCallbacks) -> Self {
-        ValidationCallbacksBuilder {
-            path: None,
-            callbacks,
-        }
-    }
-
-    #[must_use]
-    pub fn path(mut self, path: YangPath) -> Self {
-        self.path = Some(path);
-        self
-    }
-
-    #[must_use]
-    pub fn validate(mut self, cb: ValidationCallback) -> Self {
-        let path = self.path.unwrap().to_string();
-        self.callbacks.0.insert(path, cb);
-        self
-    }
-
-    #[must_use]
-    pub fn build(self) -> ValidationCallbacks {
-        self.callbacks
-    }
 }
 
 // ===== helper functions =====
 
-fn process_commit_local<P>(
+fn process_commit_local_prepare<P>(
     provider: &mut P,
-    phase: CommitPhase,
     old_config: &Arc<DataTree<'static>>,
     new_config: &Arc<DataTree<'static>>,
-    changes: &ConfigChanges,
-    resources: &mut Vec<Option<P::Resource>>,
+    changes: ConfigChanges,
+    pending: &mut Vec<PendingChange<P>>,
+    ops: &YangConfigOps<P::Change>,
 ) -> Result<(), Error>
 where
     P: Provider,
 {
     let mut event_queue = BTreeSet::new();
 
-    // Resize the resources vector to match the number of configuration changes.
-    if phase == CommitPhase::Prepare {
-        resources.resize_with(changes.len(), Default::default);
-    }
-
-    let callbacks = P::callbacks();
-    for ((cb_key, data_path), resource) in changes.iter().zip(resources) {
-        Debug::ConfigurationCallback(phase, cb_key.operation, &cb_key.path)
-            .log();
+    for (key, data_path) in changes {
+        Debug::ConfigurationChange(
+            CommitPhase::Prepare,
+            key.operation,
+            &key.path,
+        )
+        .log();
 
         // Get data node that is being created, modified or deleted.
-        let dnode_config = match cb_key.operation {
-            CallbackOp::Create | CallbackOp::Modify => new_config,
-            CallbackOp::Delete => old_config,
-            _ => unreachable!(),
+        let dnode_config = match key.operation {
+            ChangeOp::Create | ChangeOp::Modify => new_config,
+            ChangeOp::Delete => old_config,
         };
-        let dnode = dnode_config.find_path(data_path).unwrap();
-
-        // Fill-in callback arguments.
-        let mut args = CallbackArgs {
-            event_queue: &mut event_queue,
-            list_entry: P::ListEntry::default(),
-            resource,
-            old_config,
-            new_config,
-            dnode,
+        let Some(parse) = ops.parse.get(key.path.as_str()) else {
+            continue;
         };
 
-        // Lookup reference(s) associated to the list entry.
-        if phase != CommitPhase::Prepare {
-            args.list_entry = lookup_list_entry(
-                provider,
-                phase,
-                cb_key.operation,
-                &args.dnode,
-            );
-        }
+        // Convert the data node into a typed configuration change.
+        let change = dnode_config
+            .find_path(&data_path)
+            .map_err(ParseError::NodeNotFound)
+            .and_then(|dnode| parse(key.operation, &dnode))
+            .map_err(|error| Error::Parse {
+                path: data_path.clone(),
+                error,
+            })?;
 
-        match phase {
-            CommitPhase::Prepare => {
-                // Invoke 1st-phase commit callback.
-                if let Some(cb) = callbacks.get_prepare(cb_key) {
-                    (*cb)(provider, args).map_err(Error::CfgCallback)?;
-                }
-            }
-            CommitPhase::Abort => {
-                // Invoke 2nd-phase commit callback.
-                if let Some(cb) = callbacks.get_abort(cb_key) {
-                    (*cb)(provider, args);
-                }
-            }
-            CommitPhase::Apply => {
-                // Invoke 2nd-phase commit callback.
-                if let Some(cb) = callbacks.get_apply(cb_key) {
-                    (*cb)(provider, args);
-                }
-            }
-        }
+        // Record the change even on failure, so that any resource it allocated
+        // is released during the Abort phase.
+        let mut entry = PendingChange {
+            key,
+            data_path,
+            change,
+            resource: None,
+        };
+        let result = provider
+            .prepare(&entry.change, &mut entry.resource, &mut event_queue)
+            .map_err(|error| Error::Prepare {
+                path: entry.data_path.clone(),
+                error,
+            });
+        pending.push(entry);
+        result?;
     }
 
     // Process event queue once the running configuration is fully updated.
@@ -545,6 +328,39 @@ where
     }
 
     Ok(())
+}
+
+fn process_commit_local_finish<P>(
+    provider: &mut P,
+    phase: CommitPhase,
+    pending: Vec<PendingChange<P>>,
+) where
+    P: Provider,
+{
+    let mut event_queue = BTreeSet::new();
+
+    for PendingChange {
+        key,
+        data_path,
+        change,
+        mut resource,
+    } in pending
+    {
+        Debug::ConfigurationChange(phase, key.operation, &key.path).log();
+
+        if phase == CommitPhase::Abort {
+            provider.abort(change, &mut resource);
+        } else if let Err(error) =
+            provider.apply(change, &mut resource, &mut event_queue)
+        {
+            error!(%data_path, %error, "failed to apply configuration change");
+        }
+    }
+
+    // Process event queue once the running configuration is fully updated.
+    for event in event_queue {
+        provider.process_event(event);
+    }
 }
 
 fn process_commit_relayed<P>(
@@ -580,39 +396,6 @@ where
     Ok(())
 }
 
-fn lookup_list_entry<P>(
-    provider: &mut P,
-    phase: CommitPhase,
-    operation: CallbackOp,
-    dnode: &DataNodeRef<'_>,
-) -> P::ListEntry
-where
-    P: Provider,
-{
-    let callbacks = P::callbacks();
-    let ancestors =
-        if phase == CommitPhase::Apply && operation == CallbackOp::Create {
-            dnode.ancestors()
-        } else {
-            dnode.inclusive_ancestors()
-        };
-
-    let mut list_entry = P::ListEntry::default();
-    for dnode in ancestors
-        .filter(|dnode| dnode.schema().kind() == SchemaNodeKind::List)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        let path = dnode.schema().data_path();
-        if let Some(cb) = callbacks.get_lookup(path) {
-            list_entry = (*cb)(provider, list_entry, dnode);
-        }
-    }
-
-    list_entry
-}
-
 // ===== global functions =====
 
 pub fn changes_from_diff(diff: &DataDiff<'static>) -> ConfigChanges {
@@ -627,55 +410,55 @@ pub fn changes_from_diff(diff: &DataDiff<'static>) -> ConfigChanges {
                     }
 
                     let snode = dnode.schema();
-                    let operation = if CallbackOp::Create.is_valid(&snode) {
-                        CallbackOp::Create
-                    } else if CallbackOp::Modify.is_valid(&snode) {
-                        CallbackOp::Modify
+                    let operation = if ChangeOp::Create.is_valid(&snode) {
+                        ChangeOp::Create
+                    } else if ChangeOp::Modify.is_valid(&snode) {
+                        ChangeOp::Modify
                     } else {
                         continue;
                     };
 
-                    let cb_key =
-                        CallbackKey::new(dnode.schema().data_path(), operation);
-                    changes.push((cb_key, dnode.path().to_owned()));
+                    let change_key =
+                        ChangeKey::new(dnode.schema().data_path(), operation);
+                    changes.push((change_key, dnode.path().to_owned()));
                 }
             }
             DataDiffOp::Delete => {
                 let snode = dnode.schema();
-                if CallbackOp::Delete.is_valid(&snode) {
-                    let cb_key = CallbackKey::new(
+                if ChangeOp::Delete.is_valid(&snode) {
+                    let change_key = ChangeKey::new(
                         dnode.schema().data_path(),
-                        CallbackOp::Delete,
+                        ChangeOp::Delete,
                     );
-                    changes.push((cb_key, dnode.path().to_owned()));
+                    changes.push((change_key, dnode.path().to_owned()));
                     continue;
                 }
 
                 // NP-containers.
                 for dnode in dnode.traverse() {
                     let snode = dnode.schema();
-                    if !CallbackOp::Delete.is_valid(&snode) {
+                    if !ChangeOp::Delete.is_valid(&snode) {
                         continue;
                     }
 
-                    let cb_key = CallbackKey::new(
+                    let change_key = ChangeKey::new(
                         dnode.schema().data_path(),
-                        CallbackOp::Delete,
+                        ChangeOp::Delete,
                     );
-                    changes.push((cb_key, dnode.path().to_owned()));
+                    changes.push((change_key, dnode.path().to_owned()));
                 }
             }
             DataDiffOp::Replace => {
                 let snode = dnode.schema();
-                if !CallbackOp::Modify.is_valid(&snode) {
+                if !ChangeOp::Modify.is_valid(&snode) {
                     continue;
                 }
 
-                let cb_key = CallbackKey::new(
+                let change_key = ChangeKey::new(
                     dnode.schema().data_path(),
-                    CallbackOp::Modify,
+                    ChangeOp::Modify,
                 );
-                changes.push((cb_key, dnode.path().to_owned()));
+                changes.push((change_key, dnode.path().to_owned()));
             }
         }
     }
@@ -684,18 +467,11 @@ pub fn changes_from_diff(diff: &DataDiff<'static>) -> ConfigChanges {
 }
 
 pub fn validate(
-    cbs: &[&ValidationCallbacks],
+    fns: &[ValidateFn],
     config: &Arc<DataTree<'static>>,
 ) -> Result<(), Error> {
-    for (path, cb) in cbs.iter().flat_map(|cbs| cbs.0.iter()) {
-        for dnode in config.find_xpath(path).map_err(Error::YangInvalidPath)? {
-            let path = dnode.path();
-            Debug::ValidationCallback(&path).log();
-
-            // Invoke validation callback.
-            let args = ValidationCallbackArgs { dnode };
-            cb(args).map_err(Error::ValidationCallback)?;
-        }
+    for validate in fns {
+        validate(config).map_err(Error::Validate)?;
     }
 
     Ok(())
@@ -707,26 +483,37 @@ pub(crate) fn process_commit<P>(
     old_config: Arc<DataTree<'static>>,
     new_config: Arc<DataTree<'static>>,
     mut changes: ConfigChanges,
-    resources: &mut Vec<Option<P::Resource>>,
+    pending: &mut Vec<PendingChange<P>>,
 ) -> Result<api::daemon::CommitResponse, Error>
 where
     P: Provider,
 {
     // Move to a separate vector the changes that need to be relayed.
-    let callbacks = P::callbacks();
     let relayed_changes = changes
-        .extract_if(.., |(cb_key, _)| !callbacks.0.contains_key(cb_key))
+        .extract_if(.., |(change_key, _)| {
+            !P::YANG_OPS_CONFIG
+                .parse
+                .contains_key(change_key.path.as_str())
+        })
         .collect();
 
-    // Process local changes.
-    process_commit_local(
-        provider,
-        phase,
-        &old_config,
-        &new_config,
-        &changes,
-        resources,
-    )?;
+    // Process local changes. The Abort and Apply phases consume the changes
+    // parsed during the Prepare phase.
+    match phase {
+        CommitPhase::Prepare => process_commit_local_prepare(
+            provider,
+            &old_config,
+            &new_config,
+            changes,
+            pending,
+            &P::YANG_OPS_CONFIG,
+        )?,
+        CommitPhase::Abort | CommitPhase::Apply => process_commit_local_finish(
+            provider,
+            phase,
+            std::mem::take(pending),
+        ),
+    }
 
     // Process relayed changes.
     process_commit_relayed(

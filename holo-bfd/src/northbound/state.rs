@@ -77,7 +77,7 @@ impl<'a> YangList<'a, Master> for bfd::ip_mh::session_groups::session_group::Ses
     }
 }
 
-impl<'a> YangList<'a, Master> for bfd::ip_mh::session_groups::session_group::sessions::Sessions<'a> {
+impl<'a> YangList<'a, Master> for bfd::ip_mh::session_groups::session_group::sessions::Sessions {
     type ParentListEntry = &'a Session;
     type ListEntry = &'a Session;
 
@@ -88,7 +88,7 @@ impl<'a> YangList<'a, Master> for bfd::ip_mh::session_groups::session_group::ses
 
     fn new(_master: &'a Master, sess: &Self::ListEntry) -> Self {
         Self {
-            path_type: Some(sess.key.path_type().to_yang()),
+            path_type: Some(sess.key.path_type()),
             ip_encapsulation: Some(true),
             local_discriminator: Some(sess.state.local_discr),
             remote_discriminator: sess.state.remote.as_ref().map(|remote| remote.discr),
@@ -164,7 +164,7 @@ impl<'a> YangList<'a, Master> for bfd::ip_sh::sessions::session::Session<'a> {
         Self {
             interface: Cow::Borrowed(ifname),
             dest_addr: *dst,
-            path_type: Some(sess.key.path_type().to_yang()),
+            path_type: Some(sess.key.path_type()),
             ip_encapsulation: Some(true),
             local_discriminator: Some(sess.state.local_discr),
             remote_discriminator: sess.state.remote.as_ref().map(|remote| remote.discr),

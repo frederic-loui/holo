@@ -22,10 +22,6 @@ holo-yang = { path = "../holo-yang" }
 workspace = true
 
 [[bin]]
-name = "yang_callbacks"
-path = "src/yang_callbacks.rs"
-
-[[bin]]
 name = "yang_coverage"
 path = "src/yang_coverage.rs"
 

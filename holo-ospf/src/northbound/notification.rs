@@ -33,7 +33,7 @@ where
 
     let data = IfStateChange {
         routing_protocol_name: Some(instance.name.into()),
-        address_family: Some(instance.state.af.to_yang()),
+        address_family: Some(instance.state.af),
         interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
         }),
@@ -55,7 +55,7 @@ where
 
     let data = IfConfigError {
         routing_protocol_name: Some(instance.name.into()),
-        address_family: Some(instance.state.af.to_yang()),
+        address_family: Some(instance.state.af),
         interface: Some(Interface {
             interface: Some(ifname.into()),
         }),
@@ -77,7 +77,7 @@ where
 
     let data = NbrStateChange {
         routing_protocol_name: Some(instance.name.into()),
-        address_family: Some(instance.state.af.to_yang()),
+        address_family: Some(instance.state.af),
         interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
         }),
@@ -102,7 +102,7 @@ where
 
     let data = NbrRestartHelperStatusChange {
         routing_protocol_name: Some(instance.name.into()),
-        address_family: Some(instance.state.af.to_yang()),
+        address_family: Some(instance.state.af),
         interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
         }),
@@ -129,7 +129,7 @@ where
 
     let data = NbrRestartHelperStatusChange {
         routing_protocol_name: Some(instance.name.into()),
-        address_family: Some(instance.state.af.to_yang()),
+        address_family: Some(instance.state.af),
         interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
         }),
@@ -156,7 +156,7 @@ where
 
     let data = IfRxBadPacket {
         routing_protocol_name: Some(instance.name.into()),
-        address_family: Some(instance.state.af.to_yang()),
+        address_family: Some(instance.state.af),
         interface: (!iface.is_virtual_link()).then_some(Interface {
             interface: Some(iface.name.as_str().into()),
         }),

@@ -11,12 +11,38 @@ module holo-ietf-mpls-ldp-deviations {
     prefix ldp;
   }
 
+  import ietf-key-chain {
+    prefix key-chain;
+  }
+
   organization
     "Holo Routing Stack";
 
   description
     "This module defines deviation statements for the ietf-mpls-ldp
      module.";
+
+  /*
+   * Added constraints
+   */
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ldp:mpls-ldp/ldp:peers/ldp:authentication/ldp:authentication-type/ldp:password/ldp:crypto-algorithm" {
+    deviate add {
+      must 'derived-from-or-self(., "key-chain:md5")' {
+        error-message
+          "Unsupported cryptographic algorithm.";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ldp:mpls-ldp/ldp:peers/ldp:peer/ldp:authentication/ldp:authentication-type/ldp:password/ldp:crypto-algorithm" {
+    deviate add {
+      must 'derived-from-or-self(., "key-chain:md5")' {
+        error-message
+          "Unsupported cryptographic algorithm.";
+      }
+    }
+  }
 
   /*
    * Not supported nodes

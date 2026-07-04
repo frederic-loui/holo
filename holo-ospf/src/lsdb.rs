@@ -161,7 +161,7 @@ pub struct LsaLogId<V: Version> {
     pub seq_no: u32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum LsaLogReason {
     Refresh,
     ContentChange,

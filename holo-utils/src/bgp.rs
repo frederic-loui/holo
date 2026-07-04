@@ -12,7 +12,7 @@
 //! eliminating the need for shared definitions.
 
 use std::borrow::Cow;
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use holo_yang::{ToYang, TryFromYang};
 use itertools::Itertools;
@@ -47,19 +47,19 @@ pub enum Origin {
     Incomplete = 2,
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[derive(Deserialize, Serialize)]
 pub struct Comm(pub u32);
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[derive(Deserialize, Serialize)]
 pub struct ExtComm(pub [u8; 8]);
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[derive(Deserialize, Serialize)]
 pub struct Extv6Comm(pub Ipv6Addr, pub u32);
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[derive(Deserialize, Serialize)]
 pub struct LargeComm(pub [u8; 12]);
 
@@ -93,6 +93,18 @@ impl TryFromYang for AfiSafi {
         match value {
             "iana-bgp-types:ipv4-unicast" => Some(AfiSafi::Ipv4Unicast),
             "iana-bgp-types:ipv6-unicast" => Some(AfiSafi::Ipv6Unicast),
+            _ => None,
+        }
+    }
+}
+
+// ===== impl RouteType =====
+
+impl TryFromYang for RouteType {
+    fn try_from_yang(value: &str) -> Option<RouteType> {
+        match value {
+            "internal" => Some(RouteType::Internal),
+            "external" => Some(RouteType::External),
             _ => None,
         }
     }
@@ -222,24 +234,119 @@ impl ToYang for ExtComm {
     }
 }
 
+impl TryFromYang for ExtComm {
+    fn try_from_yang(value: &str) -> Option<ExtComm> {
+        // Parse extended community in the raw format.
+        if let Some(bytes) = value.strip_prefix("raw:") {
+            let bytes = bytes
+                .split(':')
+                .map(|byte| u8::from_str_radix(byte, 16).ok())
+                .collect::<Option<Vec<_>>>()?;
+            return Some(ExtComm(bytes.try_into().ok()?));
+        }
+
+        // Parse Route-Target and Route-Origin extended communities.
+        let (kind, value) = value.split_once(':')?;
+        let subtype = match kind {
+            "route-target" => 0x02,
+            "route-origin" => 0x03,
+            _ => return None,
+        };
+        let mut comm = [0u8; 8];
+        comm[1] = subtype;
+        if let Some((global, local)) = value.split_once(':') {
+            if let Ok(addr) = global.parse::<Ipv4Addr>() {
+                // IPv4 address specific.
+                comm[0] = 0x01;
+                comm[2..6].copy_from_slice(&addr.octets());
+                comm[6..]
+                    .copy_from_slice(&local.parse::<u16>().ok()?.to_be_bytes());
+            } else {
+                let asn = global.parse::<u32>().ok()?;
+                if let Ok(asn) = u16::try_from(asn) {
+                    // Two-octet AS specific.
+                    comm[2..4].copy_from_slice(&asn.to_be_bytes());
+                    comm[4..].copy_from_slice(
+                        &local.parse::<u32>().ok()?.to_be_bytes(),
+                    );
+                } else {
+                    // Four-octet AS specific.
+                    comm[0] = 0x02;
+                    comm[2..6].copy_from_slice(&asn.to_be_bytes());
+                    comm[6..].copy_from_slice(
+                        &local.parse::<u16>().ok()?.to_be_bytes(),
+                    );
+                }
+            }
+        } else {
+            // Four-octet AS specific. The YANG pattern concatenates the AS
+            // number and the local administrator without a separator, so
+            // split greedily, preferring the longest possible AS number.
+            let (asn, local) = (1..value.len()).rev().find_map(|pos| {
+                let (asn, local) = value.split_at(pos);
+                let asn = asn.parse::<u32>().ok()?;
+                let local = local.parse::<u16>().ok()?;
+                Some((asn, local))
+            })?;
+            comm[0] = 0x02;
+            comm[2..6].copy_from_slice(&asn.to_be_bytes());
+            comm[6..].copy_from_slice(&local.to_be_bytes());
+        }
+        Some(ExtComm(comm))
+    }
+}
+
 // ===== impl Extv6Comm =====
 
 impl ToYang for Extv6Comm {
     fn to_yang(&self) -> Cow<'static, str> {
         // TODO: cover other cases instead of always using the raw format.
-        let addr = self
+        let bytes = self
             .0
-            .segments()
+            .octets()
             .into_iter()
-            .map(|s| format!("{s:02x}"))
+            .chain(self.1.to_be_bytes())
+            .map(|byte| format!("{byte:02x}"))
             .join(":");
-        let local = self
-            .1
-            .to_be_bytes()
-            .into_iter()
-            .map(|s| format!("{s:02x}"))
-            .join(":");
-        format!("ipv6-raw:{addr}:{local}",).into()
+        format!("ipv6-raw:{bytes}").into()
+    }
+}
+
+impl TryFromYang for Extv6Comm {
+    fn try_from_yang(value: &str) -> Option<Extv6Comm> {
+        // Parse IPv6 extended community in the raw format (20 colon
+        // separated byte groups).
+        if let Some(value) = value.strip_prefix("ipv6-raw:") {
+            let bytes = value
+                .split(':')
+                .map(|byte| u8::from_str_radix(byte, 16).ok())
+                .collect::<Option<Vec<_>>>()?;
+            let (addr, local) = bytes.split_at(bytes.len().checked_sub(4)?);
+            let addr = Ipv6Addr::from(<[u8; 16]>::try_from(addr).ok()?);
+            let local = u32::from_be_bytes(local.try_into().ok()?);
+            return Some(Extv6Comm(addr, local));
+        }
+
+        // Parse IPv6 Route-Target and Route-Origin extended communities.
+        let (kind, value) = value.split_once(':')?;
+        let subtype: u8 = match kind {
+            "ipv6-route-target" => 0x02,
+            "ipv6-route-origin" => 0x03,
+            _ => return None,
+        };
+        let (addr, local) = value.rsplit_once(':')?;
+        let addr = addr.parse::<Ipv6Addr>().ok()?;
+        let local = local.parse::<u16>().ok()?;
+        // Pack the wire layout (type, subtype, global administrator and
+        // local administrator octets) into the same 16+4 byte split used
+        // by the wire codec.
+        let mut bytes = [0u8; 20];
+        bytes[1] = subtype;
+        bytes[2..18].copy_from_slice(&addr.octets());
+        bytes[18..].copy_from_slice(&local.to_be_bytes());
+        let addr = Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[..16]).ok()?);
+        let local = u32::from_be_bytes(bytes[16..].try_into().ok()?);
+        Some(Extv6Comm(addr, local))
     }
 }
 
@@ -260,22 +367,18 @@ impl ToYang for LargeComm {
 impl TryFromYang for LargeComm {
     fn try_from_yang(value: &str) -> Option<LargeComm> {
         // Parse large community in the "global:local:local" format.
-        let re = Regex::new(r#"^(?:(?:4[0-2][0-9][0-4][0-9][0-6][0-7][0-2][0-9][0-6])|(?:[1-3][0-9]{9}|[1-9]([0-9]{1,7})?[0-9]|[0-9])):(?:(?:4[0-2][0-9][0-4][0-9][0-6][0-7][0-2][0-9][0-6])|(?:[1-3][0-9]{9}|[1-9]([0-9]{1,7})?[0-9]|[0-9])):(?:(?:4[0-2][0-9][0-4][0-9][0-6][0-7][0-2][0-9][0-6])|(?:[1-3][0-9]{9}|[1-9]([0-9]{1,7})?[0-9]|[0-9]))$"#).unwrap();
-        if let Some(captures) = re.captures(value) {
-            let global =
-                captures.get(1).unwrap().as_str().parse::<u32>().unwrap();
-            let local1 =
-                captures.get(2).unwrap().as_str().parse::<u32>().unwrap();
-            let local2 =
-                captures.get(3).unwrap().as_str().parse::<u32>().unwrap();
-
-            let mut comm = [0u8; 12];
-            comm[..4].copy_from_slice(&global.to_be_bytes());
-            comm[4..8].copy_from_slice(&local1.to_be_bytes());
-            comm[8..].copy_from_slice(&local2.to_be_bytes());
-            return Some(LargeComm(comm));
+        let mut parts = value.split(':');
+        let global = parts.next()?.parse::<u32>().ok()?;
+        let local1 = parts.next()?.parse::<u32>().ok()?;
+        let local2 = parts.next()?.parse::<u32>().ok()?;
+        if parts.next().is_some() {
+            return None;
         }
 
-        None
+        let mut comm = [0u8; 12];
+        comm[..4].copy_from_slice(&global.to_be_bytes());
+        comm[4..8].copy_from_slice(&local1.to_be_bytes());
+        comm[8..].copy_from_slice(&local2.to_be_bytes());
+        Some(LargeComm(comm))
     }
 }

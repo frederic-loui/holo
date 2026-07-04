@@ -17,14 +17,27 @@ pub mod yang;
 #[allow(unused_imports, unused_variables)]
 #[allow(clippy::module_inception)]
 pub mod yang_gen {
+    use holo_utils::crypto::CryptoAlgo;
+    use holo_utils::ip::AddressFamily;
+    use holo_utils::protocol::Protocol;
     pub use routing::control_plane_protocols::control_plane_protocol::isis;
 
     use crate::adjacency::AdjacencyState;
-    use crate::packet::{AreaAddr, LanId, LevelType, LspId, SystemId};
+    use crate::interface::InterfaceType;
+    use crate::lsdb::LspLogReason;
+    use crate::northbound::configuration::{ExtendedSeqNumMode, InstanceTraceOption, InterfaceTraceOption, MetricType, StandardApp};
+    use crate::packet::iana::{FloodingAlgo, IgpAlgoType, IgpMetricType, MtId};
+    use crate::packet::{AreaAddr, LanId, LevelNumber, LevelType, LspId, SystemId};
+    use crate::spf::{self, SpfType};
+
     include!(concat!(env!("OUT_DIR"), "/yang_objects.rs"));
     pub mod ops {
         use crate::instance::Instance;
         type Provider = Instance;
         include!(concat!(env!("OUT_DIR"), "/yang_ops.rs"));
+    }
+    pub mod config {
+        use super::*;
+        include!(concat!(env!("OUT_DIR"), "/yang_config.rs"));
     }
 }

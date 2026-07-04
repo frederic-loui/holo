@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
+use std::borrow::Cow;
 use std::sync::{Arc, atomic};
 
 use holo_northbound::state::{ListIterator, Provider, YangContainer, YangList, YangOps};
@@ -35,7 +36,7 @@ impl Provider for Instance {
 
 // ===== YANG impls =====
 
-impl<'a> YangList<'a, Instance> for bgp::global::afi_safis::afi_safi::AfiSafi<'a> {
+impl<'a> YangList<'a, Instance> for bgp::global::afi_safis::afi_safi::AfiSafi {
     type ParentListEntry = ();
     type ListEntry = AfiSafi;
 
@@ -47,7 +48,7 @@ impl<'a> YangList<'a, Instance> for bgp::global::afi_safis::afi_safi::AfiSafi<'a
 
     fn new(_instance: &'a Instance, afi_safi: &Self::ListEntry) -> Self {
         Self {
-            name: afi_safi.to_yang(),
+            name: *afi_safi,
         }
     }
 }
@@ -83,7 +84,7 @@ impl<'a> YangContainer<'a, Instance> for bgp::global::statistics::Statistics {
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::Neighbor<'a> {
+impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::Neighbor {
     type ParentListEntry = ();
     type ListEntry = &'a Neighbor;
 
@@ -109,7 +110,7 @@ impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::Neighbor<'a> {
             peer_type: Some(nbr.peer_type),
             identifier: nbr.identifier,
             dynamically_configured: None,
-            session_state: Some(nbr.state.to_yang()),
+            session_state: Some(nbr.state),
             last_established: nbr.last_established.ignore_in_testing(),
         }
     }
@@ -125,7 +126,7 @@ impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::timers::Timer
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::afi_safis::afi_safi::AfiSafi<'a> {
+impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::afi_safis::afi_safi::AfiSafi {
     type ParentListEntry = &'a Neighbor;
     type ListEntry = (&'a Neighbor, AfiSafi);
 
@@ -147,7 +148,7 @@ impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::afi_safis::afi_saf
 
     fn new(_instance: &'a Instance, (_, afi_safi): &Self::ListEntry) -> Self {
         Self {
-            name: afi_safi.to_yang(),
+            name: *afi_safi,
             active: None,
         }
     }
@@ -176,14 +177,14 @@ impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::capabilities:
     type ParentListEntry = &'a Neighbor;
 
     fn new(_instance: &'a Instance, nbr: &Self::ParentListEntry) -> Option<Self> {
-        let negotiated_capabilities = nbr.capabilities_nego.iter().map(|cap| cap.code().to_yang());
+        let negotiated_capabilities = nbr.capabilities_nego.iter().map(|cap| cap.code());
         Some(Self {
             negotiated_capabilities: Some(Box::new(negotiated_capabilities)),
         })
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::advertised_capabilities::AdvertisedCapabilities<'a> {
+impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::advertised_capabilities::AdvertisedCapabilities {
     type ParentListEntry = &'a Neighbor;
     type ListEntry = (usize, &'a Capability);
 
@@ -196,20 +197,20 @@ impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::adve
         Self {
             code: cap.code() as u8,
             index: *index as u8,
-            name: Some(cap.code().to_yang()),
+            name: Some(cap.code()),
         }
     }
 }
 
-impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::capabilities::advertised_capabilities::value::mpbgp::Mpbgp<'a> {
+impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::capabilities::advertised_capabilities::value::mpbgp::Mpbgp {
     type ParentListEntry = (usize, &'a Capability);
 
     fn new(_instance: &'a Instance, (_, cap): &Self::ParentListEntry) -> Option<Self> {
         let (c_afi, c_safi) = cap.as_multi_protocol()?;
         Some(Self {
-            afi: Some(c_afi.to_yang()),
-            safi: Some(c_safi.to_yang()),
-            name: afi_safi_tuple(*c_afi, *c_safi).map(|afi_safi| afi_safi.to_yang()),
+            afi: Some(*c_afi),
+            safi: Some(*c_safi),
+            name: afi_safi_tuple(*c_afi, *c_safi),
         })
     }
 }
@@ -224,7 +225,7 @@ impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::capabilities:
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::advertised_capabilities::value::add_paths::afi_safis::AfiSafis<'a> {
+impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::advertised_capabilities::value::add_paths::afi_safis::AfiSafis {
     type ParentListEntry = (usize, &'a Capability);
     type ListEntry = &'a AddPathTuple;
 
@@ -236,14 +237,14 @@ impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::adve
 
     fn new(_instance: &'a Instance, ap: &Self::ListEntry) -> Self {
         Self {
-            afi: Some(ap.afi.to_yang()),
-            safi: Some(ap.safi.to_yang()),
-            mode: Some(ap.mode.to_yang()),
+            afi: Some(ap.afi),
+            safi: Some(ap.safi),
+            mode: Some(ap.mode),
         }
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::received_capabilities::ReceivedCapabilities<'a> {
+impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::received_capabilities::ReceivedCapabilities {
     type ParentListEntry = &'a Neighbor;
     type ListEntry = (usize, &'a Capability);
 
@@ -256,20 +257,20 @@ impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::rece
         Self {
             code: cap.code() as u8,
             index: *index as u8,
-            name: Some(cap.code().to_yang()),
+            name: Some(cap.code()),
         }
     }
 }
 
-impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::capabilities::received_capabilities::value::mpbgp::Mpbgp<'a> {
+impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::capabilities::received_capabilities::value::mpbgp::Mpbgp {
     type ParentListEntry = (usize, &'a Capability);
 
     fn new(_instance: &'a Instance, (_, cap): &Self::ParentListEntry) -> Option<Self> {
         let (c_afi, c_safi) = cap.as_multi_protocol()?;
         Some(Self {
-            afi: Some(c_afi.to_yang()),
-            safi: Some(c_safi.to_yang()),
-            name: afi_safi_tuple(*c_afi, *c_safi).map(|afi_safi| afi_safi.to_yang()),
+            afi: Some(*c_afi),
+            safi: Some(*c_safi),
+            name: afi_safi_tuple(*c_afi, *c_safi),
         })
     }
 }
@@ -284,7 +285,7 @@ impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::capabilities:
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::received_capabilities::value::add_paths::afi_safis::AfiSafis<'a> {
+impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::received_capabilities::value::add_paths::afi_safis::AfiSafis {
     type ParentListEntry = (usize, &'a Capability);
     type ListEntry = &'a AddPathTuple;
 
@@ -296,9 +297,9 @@ impl<'a> YangList<'a, Instance> for bgp::neighbors::neighbor::capabilities::rece
 
     fn new(_instance: &'a Instance, ap: &Self::ListEntry) -> Self {
         Self {
-            afi: Some(ap.afi.to_yang()),
-            safi: Some(ap.safi.to_yang()),
-            mode: Some(ap.mode.to_yang()),
+            afi: Some(ap.afi),
+            safi: Some(ap.safi),
+            mode: Some(ap.mode),
         }
     }
 }
@@ -310,7 +311,7 @@ impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::errors::recei
         let (time, notif) = nbr.notification_rcvd.as_ref()?;
         Some(Self {
             last_notification: Some(*time),
-            last_error: Some(notif.to_yang()),
+            last_error: Some(Cow::Borrowed(notif)),
             last_error_code: Some(notif.error_code),
             last_error_subcode: Some(notif.error_subcode),
             last_error_data: Some(Base64Str(notif.data.as_ref())),
@@ -325,7 +326,7 @@ impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::errors::sent:
         let (time, notif) = nbr.notification_sent.as_ref()?;
         Some(Self {
             last_notification: Some(*time),
-            last_error: Some(notif.to_yang()),
+            last_error: Some(Cow::Borrowed(notif)),
             last_error_code: Some(notif.error_code),
             last_error_subcode: Some(notif.error_subcode),
             last_error_data: Some(Base64Str(notif.data.as_ref())),
@@ -411,7 +412,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::attr_sets::attr_set::attributes::a
     fn new(_instance: &'a Instance, aspath_seg: &Self::ListEntry) -> Self {
         let members = aspath_seg.members.iter().copied();
         Self {
-            r#type: Some(aspath_seg.seg_type.to_yang()),
+            r#type: Some(aspath_seg.seg_type),
             member: Some(Box::new(members)),
         }
     }
@@ -430,7 +431,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::attr_sets::attr_set::attributes::a
     fn new(_instance: &'a Instance, aspath_seg: &Self::ListEntry) -> Self {
         let members = aspath_seg.members.iter().copied();
         Self {
-            r#type: Some(aspath_seg.seg_type.to_yang()),
+            r#type: Some(aspath_seg.seg_type),
             member: Some(Box::new(members)),
         }
     }
@@ -471,7 +472,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::communities::community::Community<
     }
 
     fn new(_instance: &'a Instance, comms: &Self::ListEntry) -> Self {
-        let communities = comms.value.0.iter().map(|c| c.to_yang());
+        let communities = comms.value.0.iter().copied();
         Self {
             index: comms.index.get(),
             community: Some(Box::new(communities)),
@@ -490,7 +491,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::ext_communities::ext_community::Ex
     }
 
     fn new(_instance: &'a Instance, comms: &Self::ListEntry) -> Self {
-        let communities = comms.value.0.iter().map(|c| c.to_yang());
+        let communities = comms.value.0.iter().copied();
         Self {
             index: comms.index.get(),
             ext_community: Some(Box::new(communities)),
@@ -510,7 +511,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::ipv6_ext_communities::ipv6_ext_com
     }
 
     fn new(_instance: &'a Instance, comms: &Self::ListEntry) -> Self {
-        let communities = comms.value.0.iter().map(|c| c.to_yang());
+        let communities = comms.value.0.iter().copied();
         Self {
             index: comms.index.get(),
             ipv6_ext_community: Some(Box::new(communities)),
@@ -530,7 +531,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::large_communities::large_community
     }
 
     fn new(_instance: &'a Instance, comms: &Self::ListEntry) -> Self {
-        let communities = comms.value.0.iter().map(|c| c.to_yang());
+        let communities = comms.value.0.iter().copied();
         Self {
             index: comms.index.get(),
             large_community: Some(Box::new(communities)),
@@ -538,7 +539,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::large_communities::large_community
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::AfiSafi<'a> {
+impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::AfiSafi {
     type ParentListEntry = ();
     type ListEntry = AfiSafi;
 
@@ -550,7 +551,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::AfiSafi<'a> {
 
     fn new(_instance: &'a Instance, afi_safi: &Self::ListEntry) -> Self {
         Self {
-            name: afi_safi.to_yang(),
+            name: *afi_safi,
         }
     }
 }
@@ -572,7 +573,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
     fn new(_instance: &'a Instance, (prefix, route): &Self::ListEntry) -> Self {
         Self {
             prefix: *prefix,
-            origin: route.origin.to_yang(),
+            origin: route.origin,
             path_id: 0,
             attr_index: Some(route.attrs.base.index.get()),
             community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
@@ -678,7 +679,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast::neighbors::neighbor::adj_rib_in_post::routes::route::Route<'a> {
+impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast::neighbors::neighbor::adj_rib_in_post::routes::route::Route {
     type ParentListEntry = &'a Neighbor;
     type ListEntry = (Ipv4Network, &'a Route, &'a SelectionState);
 
@@ -699,9 +700,9 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
             large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
             eligible_route: Some(selection.is_eligible()),
-            ineligible_reason: selection.ineligible_reason.as_ref().map(|r| r.to_yang()),
+            ineligible_reason: selection.ineligible_reason,
             best_path: None, // TODO
-            reject_reason: selection.reject_reason.as_ref().map(|r| r.to_yang()),
+            reject_reason: selection.reject_reason,
         }
     }
 }
@@ -846,7 +847,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
     fn new(_instance: &'a Instance, (prefix, route): &Self::ListEntry) -> Self {
         Self {
             prefix: *prefix,
-            origin: route.origin.to_yang(),
+            origin: route.origin,
             path_id: 0,
             attr_index: Some(route.attrs.base.index.get()),
             community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
@@ -952,7 +953,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
     }
 }
 
-impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast::neighbors::neighbor::adj_rib_in_post::routes::route::Route<'a> {
+impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast::neighbors::neighbor::adj_rib_in_post::routes::route::Route {
     type ParentListEntry = &'a Neighbor;
     type ListEntry = (Ipv6Network, &'a Route, &'a SelectionState);
 
@@ -973,9 +974,9 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
             large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
             eligible_route: Some(selection.is_eligible()),
-            ineligible_reason: selection.ineligible_reason.as_ref().map(|r| r.to_yang()),
+            ineligible_reason: selection.ineligible_reason,
             best_path: None, // TODO
-            reject_reason: selection.reject_reason.as_ref().map(|r| r.to_yang()),
+            reject_reason: selection.reject_reason,
         }
     }
 }

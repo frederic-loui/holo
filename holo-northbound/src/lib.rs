@@ -18,6 +18,7 @@ pub mod yang_codegen;
 
 use std::collections::HashMap;
 
+pub use holo_utils::yang::YangPath;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use yang5::data::DataNodeRef;
@@ -59,15 +60,6 @@ impl<T: YangObject> YangObjectDyn for T {
     }
 }
 
-//
-// YANG path type.
-//
-// Instances of this structure are created automatically at build-time, and
-// their use should be preferred over regular strings for extra type safety.
-//
-#[derive(Clone, Copy, Debug)]
-pub struct YangPath(&'static str);
-
 // A YANG data path, represented as a sequence of elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(Deserialize, Serialize)]
@@ -93,26 +85,6 @@ pub type NbDaemonSender = Sender<api::daemon::Request>;
 pub type NbDaemonReceiver = Receiver<api::daemon::Request>;
 pub type NbProviderSender = UnboundedSender<api::provider::Notification>;
 pub type NbProviderReceiver = UnboundedReceiver<api::provider::Notification>;
-
-// ===== impl YangPath =====
-
-impl YangPath {
-    pub const fn new(path: &'static str) -> YangPath {
-        YangPath(path)
-    }
-}
-
-impl std::fmt::Display for YangPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for YangPath {
-    fn as_ref(&self) -> &str {
-        self.0
-    }
-}
 
 // ===== impl Path =====
 
@@ -198,30 +170,12 @@ impl std::fmt::Display for Path {
     }
 }
 
-// ===== helper functions =====
-
-fn process_get_callbacks<Provider>() -> api::daemon::GetCallbacksResponse
-where
-    Provider: configuration::Provider + state::Provider + rpc::Provider,
-{
-    let callbacks = [
-        Some(<Provider as configuration::Provider>::callbacks().keys()),
-        <Provider as configuration::Provider>::nested_callbacks(),
-    ]
-    .into_iter()
-    .flatten()
-    .flat_map(|v| v.into_iter())
-    .collect();
-
-    api::daemon::GetCallbacksResponse { callbacks }
-}
-
 // ===== global functions =====
 
 // Processes a northbound message coming from the Holo daemon.
 pub fn process_northbound_msg<Provider>(
     provider: &mut Provider,
-    resources: &mut Vec<Option<Provider::Resource>>,
+    pending_changes: &mut Vec<configuration::PendingChange<Provider>>,
     request: api::daemon::Request,
 ) where
     Provider: configuration::Provider + state::Provider + rpc::Provider,
@@ -229,12 +183,6 @@ pub fn process_northbound_msg<Provider>(
     Debug::RequestRx(&request).log();
 
     match request {
-        api::daemon::Request::GetCallbacks(request) => {
-            let response = process_get_callbacks::<Provider>();
-            if let Some(responder) = request.responder {
-                responder.send(response).unwrap();
-            }
-        }
         api::daemon::Request::Commit(request) => {
             let response = configuration::process_commit(
                 provider,
@@ -242,7 +190,7 @@ pub fn process_northbound_msg<Provider>(
                 request.old_config,
                 request.new_config,
                 request.changes,
-                resources,
+                pending_changes,
             );
             if let Some(responder) = request.responder {
                 responder.send(response).unwrap();

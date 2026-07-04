@@ -13,4 +13,5 @@ fn main() {
     yang::load_modules(&mut yang_ctx, modules);
     yang_codegen::build_yang_objects(&yang_ctx, modules, "yang_objects.rs");
     yang_codegen::build_yang_ops(&yang_ctx, modules, None, "yang_ops.rs");
+    yang_codegen::build_yang_config(&yang_ctx, modules, None, "yang_config.rs");
 }

@@ -10,7 +10,6 @@ bitflags.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 derive-new.workspace = true
-enum-as-inner.workspace = true
 generational-arena.workspace = true
 ipnetwork.workspace = true
 itertools.workspace = true

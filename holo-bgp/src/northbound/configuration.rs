@@ -6,40 +6,30 @@
 
 #![allow(clippy::derivable_impls)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Arc, LazyLock as Lazy};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use enum_as_inner::EnumAsInner;
-use holo_northbound::configuration::{Callbacks, CallbacksBuilder, Provider, ValidationCallbacks, ValidationCallbacksBuilder};
+use holo_northbound::configuration::{ConfigOp, Provider, YangConfigOps};
+use holo_northbound::error::ApplyError;
 use holo_utils::bgp::AfiSafi;
 use holo_utils::ip::{AddressFamily, IpAddrKind};
-use holo_utils::policy::{ApplyPolicyCfg, DefaultPolicyType};
+use holo_utils::policy::ApplyPolicyCfg;
 use holo_utils::protocol::Protocol;
-use holo_utils::yang::DataNodeRefExt;
-use holo_yang::TryFromYang;
 
 use crate::af::{Ipv4Unicast, Ipv6Unicast};
 use crate::instance::{Instance, InstanceUpView};
-use crate::neighbor::{PeerType, fsm};
+use crate::neighbor::{Neighbor, PeerType, fsm};
 use crate::network;
 use crate::northbound::yang_gen::bgp;
+use crate::northbound::yang_gen::config::{
+    self, ConfigChange, GlobalAfiSafiChange, GlobalAfiSafiEntryChange, GlobalAfiSafiIpv4UnicastRedistributionChange, GlobalAfiSafiIpv6UnicastRedistributionChange, GlobalTraceOptionsFlagChange, GlobalTraceOptionsFlagEntryChange,
+    NeighborAfiSafiChange, NeighborAfiSafiEntryChange, NeighborChange, NeighborEntryChange, NeighborTraceOptionsFlagChange, NeighborTraceOptionsFlagEntryChange,
+};
 use crate::packet::iana::{CeaseSubcode, ErrorCode};
 use crate::packet::message::{Message, NotificationMsg};
 use crate::rib::RouteOrigin;
-
-#[derive(Debug, Default, EnumAsInner)]
-pub enum ListEntry {
-    #[default]
-    None,
-    AfiSafi(AfiSafi),
-    Redistribution(AfiSafi, Protocol),
-    TraceOption(InstanceTraceOption),
-    Neighbor(IpAddr),
-    NeighborAfiSafi(IpAddr, AfiSafi),
-    NeighborTraceOption(IpAddr, NeighborTraceOption),
-}
 
 #[derive(Debug)]
 pub enum Resource {}
@@ -55,9 +45,6 @@ pub enum Event {
     RedistributeDelete(Protocol, AddressFamily, AfiSafi),
     UpdateTraceOptions,
 }
-
-pub static VALIDATION_CALLBACKS: Lazy<ValidationCallbacks> = Lazy::new(load_validation_callbacks);
-pub static CALLBACKS: Lazy<Callbacks<Instance>> = Lazy::new(load_callbacks);
 
 // ===== configuration structs =====
 
@@ -214,7 +201,7 @@ pub struct AsPathOptions {
     pub disable_peer_as_filter: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum PrivateAsRemove {
     RemoveAll,
     ReplaceAll,
@@ -245,1412 +232,733 @@ pub struct TraceOptionPacketType {
     pub rx: bool,
 }
 
-// ===== callbacks =====
+// ===== helper functions =====
 
-fn load_callbacks() -> Callbacks<Instance> {
-    CallbacksBuilder::<Instance>::default()
-        .path(bgp::global::PATH)
-        .create_apply(|_instance, _args| {})
-        .delete_apply(|_instance, _args| {})
-        .path(bgp::global::r#as::PATH)
-        .modify_apply(|instance, args| {
-            let asn = args.dnode.get_u32();
+fn apply_instance(instance: &mut Instance, change: ConfigChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        ConfigChange::Global(_op) => {
+            // Nothing to do.
+        }
+        ConfigChange::GlobalAs(asn) => {
             instance.config.asn = asn;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::InstanceUpdate);
-        })
-        .path(bgp::global::identifier::PATH)
-        .modify_apply(|instance, args| {
-            let identifier = args.dnode.get_ipv4();
-            instance.config.identifier = Some(identifier);
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::GlobalIdentifier(identifier) => {
+            instance.config.identifier = identifier;
             event_queue.insert(Event::InstanceUpdate);
-        })
-        .delete_apply(|instance, args| {
-            instance.config.identifier = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdate);
-        })
-        .path(bgp::global::distance::external::PATH)
-        .modify_apply(|instance, args| {
-            let distance = args.dnode.get_u8();
+        }
+        ConfigChange::GlobalDistanceExternal(distance) => {
             instance.config.distance.external = distance;
-        })
-        .path(bgp::global::distance::internal::PATH)
-        .modify_apply(|instance, args| {
-            let distance = args.dnode.get_u8();
+        }
+        ConfigChange::GlobalDistanceInternal(distance) => {
             instance.config.distance.internal = distance;
-        })
-        .path(bgp::global::use_multiple_paths::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let enabled = args.dnode.get_bool();
+        }
+        ConfigChange::GlobalUseMultiplePathsEnabled(enabled) => {
             instance.config.multipath.enabled = enabled;
-        })
-        .path(bgp::global::use_multiple_paths::ebgp::allow_multiple_as::PATH)
-        .modify_apply(|instance, args| {
-            let allow = args.dnode.get_bool();
+        }
+        ConfigChange::GlobalUseMultiplePathsEbgpAllowMultipleAs(allow) => {
             instance.config.multipath.ebgp_allow_multiple_as = allow;
-        })
-        .path(bgp::global::use_multiple_paths::ebgp::maximum_paths::PATH)
-        .modify_apply(|instance, args| {
-            let max = args.dnode.get_u32();
+        }
+        ConfigChange::GlobalUseMultiplePathsEbgpMaximumPaths(max) => {
             instance.config.multipath.ebgp_max_paths = max;
-        })
-        .path(bgp::global::use_multiple_paths::ibgp::maximum_paths::PATH)
-        .modify_apply(|instance, args| {
-            let max = args.dnode.get_u32();
+        }
+        ConfigChange::GlobalUseMultiplePathsIbgpMaximumPaths(max) => {
             instance.config.multipath.ibgp_max_paths = max;
-        })
-        .path(bgp::global::route_selection_options::always_compare_med::PATH)
-        .modify_apply(|instance, args| {
-            let compare = args.dnode.get_bool();
+        }
+        ConfigChange::GlobalRouteSelectionOptionsAlwaysCompareMed(compare) => {
             instance.config.route_selection.always_compare_med = compare;
-        })
-        .path(bgp::global::route_selection_options::ignore_as_path_length::PATH)
-        .modify_apply(|instance, args| {
-            let ignore = args.dnode.get_bool();
+        }
+        ConfigChange::GlobalRouteSelectionOptionsIgnoreAsPathLength(ignore) => {
             instance.config.route_selection.ignore_as_path_length = ignore;
-        })
-        .path(bgp::global::route_selection_options::external_compare_router_id::PATH)
-        .modify_apply(|instance, args| {
-            let compare = args.dnode.get_bool();
+        }
+        ConfigChange::GlobalRouteSelectionOptionsExternalCompareRouterId(compare) => {
             instance.config.route_selection.external_compare_router_id = compare;
-        })
-        .path(bgp::global::route_selection_options::ignore_next_hop_igp_metric::PATH)
-        .modify_apply(|instance, args| {
-            let ignore = args.dnode.get_bool();
+        }
+        ConfigChange::GlobalRouteSelectionOptionsIgnoreNextHopIgpMetric(ignore) => {
             instance.config.route_selection.ignore_next_hop_igp_metric = ignore;
-        })
-        .path(bgp::global::route_selection_options::enable_med::PATH)
-        .modify_apply(|instance, args| {
-            let enable = args.dnode.get_bool();
+        }
+        ConfigChange::GlobalRouteSelectionOptionsEnableMed(enable) => {
             instance.config.route_selection.enable_med = enable;
-        })
-        .path(bgp::global::afi_safis::afi_safi::PATH)
-        .create_apply(|instance, args| {
-            let afi_safi = args.dnode.get_string_relative("./name").unwrap();
-            let afi_safi = AfiSafi::try_from_yang(&afi_safi).unwrap();
-            instance.config.afi_safi.insert(afi_safi, Default::default());
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-
-            instance.config.afi_safi.remove(&afi_safi);
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let afi_safi = dnode.get_string_relative("./name").unwrap();
-            let afi_safi = AfiSafi::try_from_yang(&afi_safi).unwrap();
-            ListEntry::AfiSafi(afi_safi)
-        })
-        .path(bgp::global::afi_safis::afi_safi::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            afi_safi.enabled = enabled;
-        })
-        .path(bgp::global::afi_safis::afi_safi::route_selection_options::always_compare_med::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let compare = args.dnode.get_bool();
-            afi_safi.route_selection.always_compare_med = compare;
-        })
-        .path(bgp::global::afi_safis::afi_safi::route_selection_options::ignore_as_path_length::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let ignore = args.dnode.get_bool();
-            afi_safi.route_selection.ignore_as_path_length = ignore;
-        })
-        .path(bgp::global::afi_safis::afi_safi::route_selection_options::external_compare_router_id::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let compare = args.dnode.get_bool();
-            afi_safi.route_selection.external_compare_router_id = compare;
-        })
-        .path(bgp::global::afi_safis::afi_safi::route_selection_options::ignore_next_hop_igp_metric::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let ignore = args.dnode.get_bool();
-            afi_safi.route_selection.ignore_next_hop_igp_metric = ignore;
-        })
-        .path(bgp::global::afi_safis::afi_safi::route_selection_options::enable_med::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let enable = args.dnode.get_bool();
-            afi_safi.route_selection.enable_med = enable;
-        })
-        .path(bgp::global::afi_safis::afi_safi::use_multiple_paths::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            afi_safi.multipath.enabled = enabled;
-        })
-        .path(bgp::global::afi_safis::afi_safi::use_multiple_paths::ebgp::allow_multiple_as::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let allow = args.dnode.get_bool();
-            afi_safi.multipath.ebgp_allow_multiple_as = allow;
-        })
-        .path(bgp::global::afi_safis::afi_safi::use_multiple_paths::ebgp::maximum_paths::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let max = args.dnode.get_u32();
-            afi_safi.multipath.ebgp_max_paths = max;
-        })
-        .path(bgp::global::afi_safis::afi_safi::use_multiple_paths::ibgp::maximum_paths::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let max = args.dnode.get_u32();
-            afi_safi.multipath.ibgp_max_paths = max;
-        })
-        .path(bgp::global::afi_safis::afi_safi::apply_policy::import_policy::PATH)
-        .create_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let policy = args.dnode.get_string();
-            afi_safi.apply_policy.import_policy.insert(policy);
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let policy = args.dnode.get_string();
-            afi_safi.apply_policy.import_policy.remove(&policy);
-        })
-        .path(bgp::global::afi_safis::afi_safi::apply_policy::default_import_policy::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let default = args.dnode.get_string();
-            let default = DefaultPolicyType::try_from_yang(&default).unwrap();
-            afi_safi.apply_policy.default_import_policy = default;
-        })
-        .path(bgp::global::afi_safis::afi_safi::apply_policy::export_policy::PATH)
-        .create_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let policy = args.dnode.get_string();
-            afi_safi.apply_policy.export_policy.insert(policy);
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let policy = args.dnode.get_string();
-            afi_safi.apply_policy.export_policy.remove(&policy);
-        })
-        .path(bgp::global::afi_safis::afi_safi::apply_policy::default_export_policy::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let default = args.dnode.get_string();
-            let default = DefaultPolicyType::try_from_yang(&default).unwrap();
-            afi_safi.apply_policy.default_export_policy = default;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv4_unicast::prefix_limit::max_prefixes::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let max = args.dnode.get_u32();
-            afi_safi.prefix_limit.max_prefixes = Some(max);
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.max_prefixes = None;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv4_unicast::prefix_limit::warning_threshold_pct::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let threshold = args.dnode.get_u8();
-            afi_safi.prefix_limit.warning_threshold_pct = Some(threshold);
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.warning_threshold_pct = None;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv4_unicast::prefix_limit::teardown::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let teardown = args.dnode.get_bool();
-            afi_safi.prefix_limit.teardown = teardown;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv4_unicast::prefix_limit::idle_time::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let idle_time = args.dnode.get_string();
-            let idle_time: u32 = idle_time.parse().unwrap();
-            afi_safi.prefix_limit.idle_time = Some(idle_time);
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.idle_time = None;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv4_unicast::send_default_route::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let send = args.dnode.get_bool();
-            afi_safi.send_default_route = send;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv4_unicast::redistribution::PATH)
-        .create_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let protocol = args.dnode.get_string_relative("./type").unwrap();
-            let protocol = Protocol::try_from_yang(&protocol).unwrap();
-            afi_safi.redistribution.insert(protocol, Default::default());
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RedistributeIbusSub(protocol, AddressFamily::Ipv4));
-        })
-        .delete_apply(|instance, args| {
-            let (afi_safi, protocol) = args.list_entry.into_redistribution().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.redistribution.remove(&protocol);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RedistributeDelete(protocol, AddressFamily::Ipv4, AfiSafi::Ipv4Unicast));
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let afi_safi = list_entry.into_afi_safi().unwrap();
-            let protocol = dnode.get_string_relative("./type").unwrap();
-            let protocol = Protocol::try_from_yang(&protocol).unwrap();
-            ListEntry::Redistribution(afi_safi, protocol)
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv6_unicast::prefix_limit::max_prefixes::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let max = args.dnode.get_u32();
-            afi_safi.prefix_limit.max_prefixes = Some(max);
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.max_prefixes = None;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv6_unicast::prefix_limit::warning_threshold_pct::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let threshold = args.dnode.get_u8();
-            afi_safi.prefix_limit.warning_threshold_pct = Some(threshold);
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.warning_threshold_pct = None;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv6_unicast::prefix_limit::teardown::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let teardown = args.dnode.get_bool();
-            afi_safi.prefix_limit.teardown = teardown;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv6_unicast::prefix_limit::idle_time::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let idle_time = args.dnode.get_string();
-            let idle_time: u32 = idle_time.parse().unwrap();
-            afi_safi.prefix_limit.idle_time = Some(idle_time);
-        })
-        .delete_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.idle_time = None;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv6_unicast::send_default_route::PATH)
-        .modify_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let send = args.dnode.get_bool();
-            afi_safi.send_default_route = send;
-        })
-        .path(bgp::global::afi_safis::afi_safi::ipv6_unicast::redistribution::PATH)
-        .create_apply(|instance, args| {
-            let afi_safi = args.list_entry.into_afi_safi().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let protocol = args.dnode.get_string_relative("./type").unwrap();
-            let protocol = Protocol::try_from_yang(&protocol).unwrap();
-            afi_safi.redistribution.insert(protocol, Default::default());
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RedistributeIbusSub(protocol, AddressFamily::Ipv6));
-        })
-        .delete_apply(|instance, args| {
-            let (afi_safi, protocol) = args.list_entry.into_redistribution().unwrap();
-            let afi_safi = instance.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.redistribution.remove(&protocol);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RedistributeDelete(protocol, AddressFamily::Ipv6, AfiSafi::Ipv6Unicast));
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let afi_safi = list_entry.into_afi_safi().unwrap();
-            let protocol = dnode.get_string_relative("./type").unwrap();
-            let protocol = Protocol::try_from_yang(&protocol).unwrap();
-            ListEntry::Redistribution(afi_safi, protocol)
-        })
-        .path(bgp::global::apply_policy::import_policy::PATH)
-        .create_apply(|instance, args| {
-            let policy = args.dnode.get_string();
-            instance.config.apply_policy.import_policy.insert(policy);
-        })
-        .delete_apply(|instance, args| {
-            let policy = args.dnode.get_string();
-            instance.config.apply_policy.import_policy.remove(&policy);
-        })
-        .path(bgp::global::apply_policy::default_import_policy::PATH)
-        .modify_apply(|instance, args| {
-            let default = args.dnode.get_string();
-            let default = DefaultPolicyType::try_from_yang(&default).unwrap();
+        }
+        ConfigChange::GlobalAfiSafi(keys, change) => {
+            apply_afi_safi(instance, keys.name, change, event_queue)?;
+        }
+        ConfigChange::GlobalApplyPolicyImportPolicy(op, policy) => match op {
+            ConfigOp::Create => {
+                instance.config.apply_policy.import_policy.insert(policy);
+            }
+            ConfigOp::Delete => {
+                instance.config.apply_policy.import_policy.remove(&policy);
+            }
+        },
+        ConfigChange::GlobalApplyPolicyDefaultImportPolicy(default) => {
             instance.config.apply_policy.default_import_policy = default;
-        })
-        .path(bgp::global::apply_policy::export_policy::PATH)
-        .create_apply(|instance, args| {
-            let policy = args.dnode.get_string();
-            instance.config.apply_policy.export_policy.insert(policy);
-        })
-        .delete_apply(|instance, args| {
-            let policy = args.dnode.get_string();
-            instance.config.apply_policy.export_policy.remove(&policy);
-        })
-        .path(bgp::global::apply_policy::default_export_policy::PATH)
-        .modify_apply(|instance, args| {
-            let default = args.dnode.get_string();
-            let default = DefaultPolicyType::try_from_yang(&default).unwrap();
+        }
+        ConfigChange::GlobalApplyPolicyExportPolicy(op, policy) => match op {
+            ConfigOp::Create => {
+                instance.config.apply_policy.export_policy.insert(policy);
+            }
+            ConfigOp::Delete => {
+                instance.config.apply_policy.export_policy.remove(&policy);
+            }
+        },
+        ConfigChange::GlobalApplyPolicyDefaultExportPolicy(default) => {
             instance.config.apply_policy.default_export_policy = default;
-        })
-        .path(bgp::global::reject_as_sets::PATH)
-        .modify_apply(|instance, args| {
-            let reject = args.dnode.get_bool();
+        }
+        ConfigChange::GlobalRejectAsSets(reject) => {
             instance.config.reject_as_sets = reject;
-        })
-        .path(bgp::global::trace_options::flag::PATH)
-        .create_apply(|instance, args| {
-            let trace_opt = args.dnode.get_string_relative("name").unwrap();
-            let trace_opt = InstanceTraceOption::try_from_yang(&trace_opt).unwrap();
-            let trace_opts = &mut instance.config.trace_opts;
-            match trace_opt {
-                InstanceTraceOption::InternalBus => trace_opts.ibus = true,
-                InstanceTraceOption::Nht => trace_opts.nht = true,
-                InstanceTraceOption::Events => trace_opts.events = true,
-                InstanceTraceOption::PacketsAll => {
-                    trace_opts.packets.all.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsOpen => {
-                    trace_opts.packets.open.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsUpdate => {
-                    trace_opts.packets.update.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsNotification => {
-                    trace_opts.packets.notification.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsKeepalive => {
-                    trace_opts.packets.keepalive.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsRefresh => {
-                    trace_opts.packets.refresh.get_or_insert_default();
-                }
-                InstanceTraceOption::Route => trace_opts.route = true,
-            }
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .delete_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let trace_opts = &mut instance.config.trace_opts;
-            match trace_opt {
-                InstanceTraceOption::Events => trace_opts.events = false,
-                InstanceTraceOption::InternalBus => trace_opts.ibus = false,
-                InstanceTraceOption::Nht => trace_opts.nht = false,
-                InstanceTraceOption::PacketsAll => trace_opts.packets.all = None,
-                InstanceTraceOption::PacketsOpen => trace_opts.packets.open = None,
-                InstanceTraceOption::PacketsUpdate => trace_opts.packets.update = None,
-                InstanceTraceOption::PacketsNotification => trace_opts.packets.notification = None,
-                InstanceTraceOption::PacketsKeepalive => trace_opts.packets.keepalive = None,
-                InstanceTraceOption::PacketsRefresh => trace_opts.packets.refresh = None,
-                InstanceTraceOption::Route => trace_opts.route = false,
-            }
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let trace_opt = dnode.get_string_relative("name").unwrap();
-            let trace_opt = InstanceTraceOption::try_from_yang(&trace_opt).unwrap();
-            ListEntry::TraceOption(trace_opt)
-        })
-        .path(bgp::global::trace_options::flag::send::PATH)
-        .modify_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut instance.config.trace_opts;
-            let Some(trace_opt_packet) = (match trace_opt {
-                InstanceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
-                InstanceTraceOption::PacketsOpen => trace_opts.packets.open.as_mut(),
-                InstanceTraceOption::PacketsUpdate => trace_opts.packets.update.as_mut(),
-                InstanceTraceOption::PacketsNotification => trace_opts.packets.notification.as_mut(),
-                InstanceTraceOption::PacketsKeepalive => trace_opts.packets.keepalive.as_mut(),
-                InstanceTraceOption::PacketsRefresh => trace_opts.packets.refresh.as_mut(),
-                _ => None,
-            }) else {
-                return;
-            };
-            trace_opt_packet.tx = enable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .path(bgp::global::trace_options::flag::receive::PATH)
-        .modify_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut instance.config.trace_opts;
-            let Some(trace_opt_packet) = (match trace_opt {
-                InstanceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
-                InstanceTraceOption::PacketsOpen => trace_opts.packets.open.as_mut(),
-                InstanceTraceOption::PacketsUpdate => trace_opts.packets.update.as_mut(),
-                InstanceTraceOption::PacketsNotification => trace_opts.packets.notification.as_mut(),
-                InstanceTraceOption::PacketsKeepalive => trace_opts.packets.keepalive.as_mut(),
-                InstanceTraceOption::PacketsRefresh => trace_opts.packets.refresh.as_mut(),
-                _ => None,
-            }) else {
-                return;
-            };
-            trace_opt_packet.rx = enable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .path(bgp::neighbors::neighbor::PATH)
-        .create_apply(|instance, args| {
-            let nbr_addr = args.dnode.get_ip_relative("./remote-address").unwrap();
-            let peer_as = args.dnode.get_u32_relative("./peer-as").unwrap();
-
-            let peer_type = if instance.config.asn == peer_as { PeerType::Internal } else { PeerType::External };
-            instance.neighbors.insert(nbr_addr, peer_type);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::NeighborUpdate(nbr_addr));
-        })
-        .delete_apply(|_instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::NeighborDelete(nbr_addr));
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let nbr_addr = dnode.get_ip_relative("./remote-address").unwrap();
-            ListEntry::Neighbor(nbr_addr)
-        })
-        .path(bgp::neighbors::neighbor::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            nbr.config.enabled = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::NeighborUpdate(nbr_addr));
-        })
-        .path(bgp::neighbors::neighbor::peer_as::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let asn = args.dnode.get_u32();
-            nbr.config.peer_as = asn;
-            nbr.peer_type = if instance.config.asn == nbr.config.peer_as { PeerType::Internal } else { PeerType::External };
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-        })
-        .path(bgp::neighbors::neighbor::local_as::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let asn = args.dnode.get_u32();
-            nbr.config.local_as = Some(asn);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.local_as = None;
-        })
-        .path(bgp::neighbors::neighbor::remove_private_as::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let private_as_remove = args.dnode.get_string();
-            let private_as_remove = PrivateAsRemove::try_from_yang(&private_as_remove).unwrap();
-            nbr.config.private_as_remove = Some(private_as_remove);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.private_as_remove = None;
-        })
-        .path(bgp::neighbors::neighbor::description::PATH)
-        .modify_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(bgp::neighbors::neighbor::timers::connect_retry_interval::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let interval = args.dnode.get_u16();
-            nbr.config.timers.connect_retry_interval = interval;
-        })
-        .path(bgp::neighbors::neighbor::timers::hold_time::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let holdtime = args.dnode.get_u16();
-            nbr.config.timers.holdtime = holdtime;
-        })
-        .path(bgp::neighbors::neighbor::timers::keepalive::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let keepalive = args.dnode.get_u16();
-            nbr.config.timers.keepalive = Some(keepalive);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.timers.keepalive = None;
-        })
-        .path(bgp::neighbors::neighbor::timers::min_as_origination_interval::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let interval = args.dnode.get_u16();
-            nbr.config.timers.min_as_orig_interval = Some(interval);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.timers.min_as_orig_interval = None;
-        })
-        .path(bgp::neighbors::neighbor::timers::min_route_advertisement_interval::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let interval = args.dnode.get_u16();
-            nbr.config.timers.min_route_adv_interval = Some(interval);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.timers.min_route_adv_interval = None;
-        })
-        .path(bgp::neighbors::neighbor::transport::local_address::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let addr = args.dnode.get_ip();
-            nbr.config.transport.local_addr = Some(addr);
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.transport.local_addr = None;
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-        })
-        .path(bgp::neighbors::neighbor::transport::tcp_mss::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let tcp_mss = args.dnode.get_u16();
-            nbr.config.transport.tcp_mss = Some(tcp_mss);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.transport.tcp_mss = None;
-        })
-        .path(bgp::neighbors::neighbor::transport::ebgp_multihop::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            nbr.config.transport.ebgp_multihop_enabled = enabled;
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-        })
-        .path(bgp::neighbors::neighbor::transport::ebgp_multihop::multihop_ttl::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let ttl = args.dnode.get_u8();
-            nbr.config.transport.ebgp_multihop_ttl = Some(ttl);
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.transport.ebgp_multihop_ttl = None;
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-        })
-        .path(bgp::neighbors::neighbor::transport::passive_mode::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let passive_mode = args.dnode.get_bool();
-            nbr.config.transport.passive_mode = passive_mode;
-        })
-        .path(bgp::neighbors::neighbor::transport::ttl_security::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let ttl_security = args.dnode.get_u8();
-            nbr.config.transport.ttl_security = Some(ttl_security);
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-        })
-        .path(bgp::neighbors::neighbor::transport::secure_session::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            nbr.config.transport.secure_session_enabled = enabled;
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-            event_queue.insert(Event::NeighborUpdateAuth(nbr.remote_addr));
-        })
-        .path(bgp::neighbors::neighbor::transport::secure_session::options::md5_key_string::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let keychain = args.dnode.get_string();
-            nbr.config.transport.md5_key = Some(keychain);
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-            event_queue.insert(Event::NeighborUpdateAuth(nbr.remote_addr));
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.transport.md5_key = None;
-
-            let event_queue = args.event_queue;
-            let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
-            event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
-            event_queue.insert(Event::NeighborUpdateAuth(nbr.remote_addr));
-        })
-        .path(bgp::neighbors::neighbor::logging_options::log_neighbor_state_changes::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let log = args.dnode.get_bool();
-            nbr.config.log_neighbor_state_changes = log;
-        })
-        .path(bgp::neighbors::neighbor::as_path_options::allow_own_as::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let allow = args.dnode.get_u8();
-            nbr.config.as_path_options.allow_own_as = allow;
-        })
-        .path(bgp::neighbors::neighbor::as_path_options::replace_peer_as::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let replace = args.dnode.get_bool();
-            nbr.config.as_path_options.replace_peer_as = replace;
-        })
-        .path(bgp::neighbors::neighbor::as_path_options::disable_peer_as_filter::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let disable = args.dnode.get_bool();
-            nbr.config.as_path_options.disable_peer_as_filter = disable;
-        })
-        .path(bgp::neighbors::neighbor::apply_policy::import_policy::PATH)
-        .create_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let policy = args.dnode.get_string();
-            nbr.config.apply_policy.import_policy.insert(policy);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let policy = args.dnode.get_string();
-            nbr.config.apply_policy.import_policy.remove(&policy);
-        })
-        .path(bgp::neighbors::neighbor::apply_policy::default_import_policy::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let default = args.dnode.get_string();
-            let default = DefaultPolicyType::try_from_yang(&default).unwrap();
-            nbr.config.apply_policy.default_import_policy = default;
-        })
-        .path(bgp::neighbors::neighbor::apply_policy::export_policy::PATH)
-        .create_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let policy = args.dnode.get_string();
-            nbr.config.apply_policy.export_policy.insert(policy);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let policy = args.dnode.get_string();
-            nbr.config.apply_policy.export_policy.remove(&policy);
-        })
-        .path(bgp::neighbors::neighbor::apply_policy::default_export_policy::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let default = args.dnode.get_string();
-            let default = DefaultPolicyType::try_from_yang(&default).unwrap();
-            nbr.config.apply_policy.default_export_policy = default;
-        })
-        .path(bgp::neighbors::neighbor::prefix_limit::max_prefixes::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let max = args.dnode.get_u32();
-            nbr.config.prefix_limit.max_prefixes = Some(max);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.prefix_limit.max_prefixes = None;
-        })
-        .path(bgp::neighbors::neighbor::prefix_limit::warning_threshold_pct::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let threshold = args.dnode.get_u8();
-            nbr.config.prefix_limit.warning_threshold_pct = Some(threshold);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.prefix_limit.warning_threshold_pct = None;
-        })
-        .path(bgp::neighbors::neighbor::prefix_limit::teardown::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let teardown = args.dnode.get_bool();
-            nbr.config.prefix_limit.teardown = teardown;
-        })
-        .path(bgp::neighbors::neighbor::prefix_limit::idle_time::PATH)
-        .modify_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let idle_time = args.dnode.get_string();
-            let idle_time: u32 = idle_time.parse().unwrap();
-            nbr.config.prefix_limit.idle_time = Some(idle_time);
-        })
-        .delete_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            nbr.config.prefix_limit.idle_time = None;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::PATH)
-        .create_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let afi_safi = args.dnode.get_string_relative("./name").unwrap();
-            let afi_safi = AfiSafi::try_from_yang(&afi_safi).unwrap();
-            nbr.config.afi_safi.insert(afi_safi, Default::default());
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            nbr.config.afi_safi.remove(&afi_safi);
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let nbr_addr = list_entry.into_neighbor().unwrap();
-            let afi_safi = dnode.get_string_relative("./name").unwrap();
-            let afi_safi = AfiSafi::try_from_yang(&afi_safi).unwrap();
-            ListEntry::NeighborAfiSafi(nbr_addr, afi_safi)
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            afi_safi.enabled = enabled;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::apply_policy::import_policy::PATH)
-        .create_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let policy = args.dnode.get_string();
-            afi_safi.apply_policy.import_policy.insert(policy);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let policy = args.dnode.get_string();
-            afi_safi.apply_policy.import_policy.remove(&policy);
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::apply_policy::default_import_policy::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let default = args.dnode.get_string();
-            let default = DefaultPolicyType::try_from_yang(&default).unwrap();
-            afi_safi.apply_policy.default_import_policy = default;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::apply_policy::export_policy::PATH)
-        .create_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let policy = args.dnode.get_string();
-            afi_safi.apply_policy.export_policy.insert(policy);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let policy = args.dnode.get_string();
-            afi_safi.apply_policy.export_policy.remove(&policy);
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::apply_policy::default_export_policy::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let default = args.dnode.get_string();
-            let default = DefaultPolicyType::try_from_yang(&default).unwrap();
-            afi_safi.apply_policy.default_export_policy = default;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv4_unicast::prefix_limit::max_prefixes::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let max = args.dnode.get_u32();
-            afi_safi.prefix_limit.max_prefixes = Some(max);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.max_prefixes = None;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv4_unicast::prefix_limit::warning_threshold_pct::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let threshold = args.dnode.get_u8();
-            afi_safi.prefix_limit.warning_threshold_pct = Some(threshold);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.warning_threshold_pct = None;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv4_unicast::prefix_limit::teardown::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let teardown = args.dnode.get_bool();
-            afi_safi.prefix_limit.teardown = teardown;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv4_unicast::prefix_limit::idle_time::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let idle_time = args.dnode.get_string();
-            let idle_time: u32 = idle_time.parse().unwrap();
-            afi_safi.prefix_limit.idle_time = Some(idle_time);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.idle_time = None;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv4_unicast::send_default_route::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let send = args.dnode.get_bool();
-            afi_safi.send_default_route = send;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv6_unicast::prefix_limit::max_prefixes::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let max = args.dnode.get_u32();
-            afi_safi.prefix_limit.max_prefixes = Some(max);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.max_prefixes = None;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv6_unicast::prefix_limit::warning_threshold_pct::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let threshold = args.dnode.get_u8();
-            afi_safi.prefix_limit.warning_threshold_pct = Some(threshold);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.warning_threshold_pct = None;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv6_unicast::prefix_limit::teardown::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let teardown = args.dnode.get_bool();
-            afi_safi.prefix_limit.teardown = teardown;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv6_unicast::prefix_limit::idle_time::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let idle_time = args.dnode.get_string();
-            let idle_time: u32 = idle_time.parse().unwrap();
-            afi_safi.prefix_limit.idle_time = Some(idle_time);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            afi_safi.prefix_limit.idle_time = None;
-        })
-        .path(bgp::neighbors::neighbor::afi_safis::afi_safi::ipv6_unicast::send_default_route::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, afi_safi) = args.list_entry.into_neighbor_afi_safi().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-            let afi_safi = nbr.config.afi_safi.get_mut(&afi_safi).unwrap();
-
-            let send = args.dnode.get_bool();
-            afi_safi.send_default_route = send;
-        })
-        .path(bgp::neighbors::neighbor::trace_options::flag::PATH)
-        .create_apply(|instance, args| {
-            let nbr_addr = args.list_entry.into_neighbor().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let trace_opt = args.dnode.get_string_relative("name").unwrap();
-            let trace_opt = NeighborTraceOption::try_from_yang(&trace_opt).unwrap();
-            let trace_opts = &mut nbr.config.trace_opts;
-            match trace_opt {
-                NeighborTraceOption::Events => trace_opts.events = Some(true),
-                NeighborTraceOption::PacketsAll => {
-                    trace_opts.packets.all.get_or_insert_default();
-                }
-                NeighborTraceOption::PacketsOpen => {
-                    trace_opts.packets.open.get_or_insert_default();
-                }
-                NeighborTraceOption::PacketsUpdate => {
-                    trace_opts.packets.update.get_or_insert_default();
-                }
-                NeighborTraceOption::PacketsNotification => {
-                    trace_opts.packets.notification.get_or_insert_default();
-                }
-                NeighborTraceOption::PacketsKeepalive => {
-                    trace_opts.packets.keepalive.get_or_insert_default();
-                }
-                NeighborTraceOption::PacketsRefresh => {
-                    trace_opts.packets.refresh.get_or_insert_default();
-                }
-            }
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .delete_apply(|instance, args| {
-            let (nbr_addr, trace_opt) = args.list_entry.into_neighbor_trace_option().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let trace_opts = &mut nbr.config.trace_opts;
-            match trace_opt {
-                NeighborTraceOption::Events => trace_opts.events = None,
-                NeighborTraceOption::PacketsAll => trace_opts.packets.all = None,
-                NeighborTraceOption::PacketsOpen => trace_opts.packets.open = None,
-                NeighborTraceOption::PacketsUpdate => trace_opts.packets.update = None,
-                NeighborTraceOption::PacketsNotification => trace_opts.packets.notification = None,
-                NeighborTraceOption::PacketsKeepalive => trace_opts.packets.keepalive = None,
-                NeighborTraceOption::PacketsRefresh => trace_opts.packets.refresh = None,
-            }
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let nbr_addr = list_entry.into_neighbor().unwrap();
-            let trace_opt = dnode.get_string_relative("name").unwrap();
-            let trace_opt = NeighborTraceOption::try_from_yang(&trace_opt).unwrap();
-            ListEntry::NeighborTraceOption(nbr_addr, trace_opt)
-        })
-        .path(bgp::neighbors::neighbor::trace_options::flag::send::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, trace_opt) = args.list_entry.into_neighbor_trace_option().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut nbr.config.trace_opts;
-            let Some(trace_opt_packet) = (match trace_opt {
-                NeighborTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
-                NeighborTraceOption::PacketsOpen => trace_opts.packets.open.as_mut(),
-                NeighborTraceOption::PacketsUpdate => trace_opts.packets.update.as_mut(),
-                NeighborTraceOption::PacketsNotification => trace_opts.packets.notification.as_mut(),
-                NeighborTraceOption::PacketsKeepalive => trace_opts.packets.keepalive.as_mut(),
-                NeighborTraceOption::PacketsRefresh => trace_opts.packets.refresh.as_mut(),
-                _ => None,
-            }) else {
-                return;
-            };
-            trace_opt_packet.tx = enable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .path(bgp::neighbors::neighbor::trace_options::flag::receive::PATH)
-        .modify_apply(|instance, args| {
-            let (nbr_addr, trace_opt) = args.list_entry.into_neighbor_trace_option().unwrap();
-            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
-
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut nbr.config.trace_opts;
-            let Some(trace_opt_packet) = (match trace_opt {
-                NeighborTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
-                NeighborTraceOption::PacketsOpen => trace_opts.packets.open.as_mut(),
-                NeighborTraceOption::PacketsUpdate => trace_opts.packets.update.as_mut(),
-                NeighborTraceOption::PacketsNotification => trace_opts.packets.notification.as_mut(),
-                NeighborTraceOption::PacketsKeepalive => trace_opts.packets.keepalive.as_mut(),
-                NeighborTraceOption::PacketsRefresh => trace_opts.packets.refresh.as_mut(),
-                _ => None,
-            }) else {
-                return;
-            };
-            trace_opt_packet.rx = enable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .build()
+        }
+        ConfigChange::GlobalTraceOptionsFlag(keys, change) => {
+            apply_trace_options(instance, keys.name, change, event_queue)?;
+        }
+        ConfigChange::Neighbor(keys, change) => {
+            apply_neighbor(instance, keys.remote_address, change, event_queue)?;
+        }
+    }
+
+    Ok(())
 }
 
-fn load_validation_callbacks() -> ValidationCallbacks {
-    ValidationCallbacksBuilder::default().build()
+fn apply_trace_options(instance: &mut Instance, trace_opt: InstanceTraceOption, change: GlobalTraceOptionsFlagChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    let trace_opts = &mut instance.config.trace_opts;
+    match change {
+        GlobalTraceOptionsFlagChange::Create => match trace_opt {
+            InstanceTraceOption::Events => trace_opts.events = true,
+            InstanceTraceOption::InternalBus => trace_opts.ibus = true,
+            InstanceTraceOption::Nht => trace_opts.nht = true,
+            InstanceTraceOption::Route => trace_opts.route = true,
+            InstanceTraceOption::PacketsAll => {
+                trace_opts.packets.all.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsOpen => {
+                trace_opts.packets.open.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsUpdate => {
+                trace_opts.packets.update.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsNotification => {
+                trace_opts.packets.notification.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsKeepalive => {
+                trace_opts.packets.keepalive.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsRefresh => {
+                trace_opts.packets.refresh.get_or_insert_default();
+            }
+        },
+        GlobalTraceOptionsFlagChange::Delete => match trace_opt {
+            InstanceTraceOption::Events => trace_opts.events = false,
+            InstanceTraceOption::InternalBus => trace_opts.ibus = false,
+            InstanceTraceOption::Nht => trace_opts.nht = false,
+            InstanceTraceOption::Route => trace_opts.route = false,
+            InstanceTraceOption::PacketsAll => trace_opts.packets.all = None,
+            InstanceTraceOption::PacketsOpen => trace_opts.packets.open = None,
+            InstanceTraceOption::PacketsUpdate => trace_opts.packets.update = None,
+            InstanceTraceOption::PacketsNotification => trace_opts.packets.notification = None,
+            InstanceTraceOption::PacketsKeepalive => trace_opts.packets.keepalive = None,
+            InstanceTraceOption::PacketsRefresh => trace_opts.packets.refresh = None,
+        },
+        GlobalTraceOptionsFlagChange::Entry(change) => {
+            let trace_opt_packet = match trace_opt {
+                InstanceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
+                InstanceTraceOption::PacketsOpen => trace_opts.packets.open.as_mut(),
+                InstanceTraceOption::PacketsUpdate => trace_opts.packets.update.as_mut(),
+                InstanceTraceOption::PacketsNotification => trace_opts.packets.notification.as_mut(),
+                InstanceTraceOption::PacketsKeepalive => trace_opts.packets.keepalive.as_mut(),
+                InstanceTraceOption::PacketsRefresh => trace_opts.packets.refresh.as_mut(),
+                _ => None,
+            };
+            let Some(trace_opt_packet) = trace_opt_packet else {
+                return Ok(());
+            };
+            match change {
+                GlobalTraceOptionsFlagEntryChange::Send(enable) => {
+                    trace_opt_packet.tx = enable;
+                }
+                GlobalTraceOptionsFlagEntryChange::Receive(enable) => {
+                    trace_opt_packet.rx = enable;
+                }
+            }
+        }
+    }
+    event_queue.insert(Event::UpdateTraceOptions);
+
+    Ok(())
+}
+
+fn apply_afi_safi(instance: &mut Instance, afi_safi: AfiSafi, change: GlobalAfiSafiChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        GlobalAfiSafiChange::Create => {
+            instance.config.afi_safi.insert(afi_safi, Default::default());
+        }
+        GlobalAfiSafiChange::Delete => {
+            instance.config.afi_safi.remove(&afi_safi);
+        }
+        GlobalAfiSafiChange::Entry(change) => {
+            let afi_safi_cfg = instance.config.afi_safi.get_mut(&afi_safi).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                GlobalAfiSafiEntryChange::Enabled(enabled) => {
+                    afi_safi_cfg.enabled = enabled;
+                }
+                GlobalAfiSafiEntryChange::RouteSelectionOptionsAlwaysCompareMed(compare) => {
+                    afi_safi_cfg.route_selection.always_compare_med = compare;
+                }
+                GlobalAfiSafiEntryChange::RouteSelectionOptionsIgnoreAsPathLength(ignore) => {
+                    afi_safi_cfg.route_selection.ignore_as_path_length = ignore;
+                }
+                GlobalAfiSafiEntryChange::RouteSelectionOptionsExternalCompareRouterId(compare) => {
+                    afi_safi_cfg.route_selection.external_compare_router_id = compare;
+                }
+                GlobalAfiSafiEntryChange::RouteSelectionOptionsIgnoreNextHopIgpMetric(ignore) => {
+                    afi_safi_cfg.route_selection.ignore_next_hop_igp_metric = ignore;
+                }
+                GlobalAfiSafiEntryChange::RouteSelectionOptionsEnableMed(enable) => {
+                    afi_safi_cfg.route_selection.enable_med = enable;
+                }
+                GlobalAfiSafiEntryChange::UseMultiplePathsEnabled(enabled) => {
+                    afi_safi_cfg.multipath.enabled = enabled;
+                }
+                GlobalAfiSafiEntryChange::UseMultiplePathsEbgpAllowMultipleAs(allow) => {
+                    afi_safi_cfg.multipath.ebgp_allow_multiple_as = allow;
+                }
+                GlobalAfiSafiEntryChange::UseMultiplePathsEbgpMaximumPaths(max) => {
+                    afi_safi_cfg.multipath.ebgp_max_paths = max;
+                }
+                GlobalAfiSafiEntryChange::UseMultiplePathsIbgpMaximumPaths(max) => {
+                    afi_safi_cfg.multipath.ibgp_max_paths = max;
+                }
+                GlobalAfiSafiEntryChange::ApplyPolicyImportPolicy(op, policy) => match op {
+                    ConfigOp::Create => {
+                        afi_safi_cfg.apply_policy.import_policy.insert(policy);
+                    }
+                    ConfigOp::Delete => {
+                        afi_safi_cfg.apply_policy.import_policy.remove(&policy);
+                    }
+                },
+                GlobalAfiSafiEntryChange::ApplyPolicyDefaultImportPolicy(default) => {
+                    afi_safi_cfg.apply_policy.default_import_policy = default;
+                }
+                GlobalAfiSafiEntryChange::ApplyPolicyExportPolicy(op, policy) => match op {
+                    ConfigOp::Create => {
+                        afi_safi_cfg.apply_policy.export_policy.insert(policy);
+                    }
+                    ConfigOp::Delete => {
+                        afi_safi_cfg.apply_policy.export_policy.remove(&policy);
+                    }
+                },
+                GlobalAfiSafiEntryChange::ApplyPolicyDefaultExportPolicy(default) => {
+                    afi_safi_cfg.apply_policy.default_export_policy = default;
+                }
+                GlobalAfiSafiEntryChange::Ipv4UnicastPrefixLimitMaxPrefixes(max) | GlobalAfiSafiEntryChange::Ipv6UnicastPrefixLimitMaxPrefixes(max) => {
+                    afi_safi_cfg.prefix_limit.max_prefixes = max;
+                }
+                GlobalAfiSafiEntryChange::Ipv4UnicastPrefixLimitWarningThresholdPct(threshold) | GlobalAfiSafiEntryChange::Ipv6UnicastPrefixLimitWarningThresholdPct(threshold) => {
+                    afi_safi_cfg.prefix_limit.warning_threshold_pct = threshold;
+                }
+                GlobalAfiSafiEntryChange::Ipv4UnicastPrefixLimitTeardown(teardown) | GlobalAfiSafiEntryChange::Ipv6UnicastPrefixLimitTeardown(teardown) => {
+                    afi_safi_cfg.prefix_limit.teardown = teardown;
+                }
+                GlobalAfiSafiEntryChange::Ipv4UnicastPrefixLimitIdleTime(idle_time) | GlobalAfiSafiEntryChange::Ipv6UnicastPrefixLimitIdleTime(idle_time) => {
+                    afi_safi_cfg.prefix_limit.idle_time = idle_time;
+                }
+                GlobalAfiSafiEntryChange::Ipv4UnicastSendDefaultRoute(send) | GlobalAfiSafiEntryChange::Ipv6UnicastSendDefaultRoute(send) => {
+                    afi_safi_cfg.send_default_route = send;
+                }
+                GlobalAfiSafiEntryChange::Ipv4UnicastRedistribution(keys, change) => {
+                    apply_afi_safi_ipv4_redistribution(afi_safi_cfg, keys.r#type, change, event_queue)?;
+                }
+                GlobalAfiSafiEntryChange::Ipv6UnicastRedistribution(keys, change) => {
+                    apply_afi_safi_ipv6_redistribution(afi_safi_cfg, keys.r#type, change, event_queue)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_afi_safi_ipv4_redistribution(afi_safi_cfg: &mut InstanceAfiSafiCfg, protocol: Protocol, change: GlobalAfiSafiIpv4UnicastRedistributionChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        GlobalAfiSafiIpv4UnicastRedistributionChange::Create => {
+            afi_safi_cfg.redistribution.insert(protocol, Default::default());
+            event_queue.insert(Event::RedistributeIbusSub(protocol, AddressFamily::Ipv4));
+        }
+        GlobalAfiSafiIpv4UnicastRedistributionChange::Delete => {
+            afi_safi_cfg.redistribution.remove(&protocol);
+            event_queue.insert(Event::RedistributeDelete(protocol, AddressFamily::Ipv4, AfiSafi::Ipv4Unicast));
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_afi_safi_ipv6_redistribution(afi_safi_cfg: &mut InstanceAfiSafiCfg, protocol: Protocol, change: GlobalAfiSafiIpv6UnicastRedistributionChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        GlobalAfiSafiIpv6UnicastRedistributionChange::Create => {
+            afi_safi_cfg.redistribution.insert(protocol, Default::default());
+            event_queue.insert(Event::RedistributeIbusSub(protocol, AddressFamily::Ipv6));
+        }
+        GlobalAfiSafiIpv6UnicastRedistributionChange::Delete => {
+            afi_safi_cfg.redistribution.remove(&protocol);
+            event_queue.insert(Event::RedistributeDelete(protocol, AddressFamily::Ipv6, AfiSafi::Ipv6Unicast));
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_neighbor(instance: &mut Instance, nbr_addr: IpAddr, change: NeighborChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        NeighborChange::Create => {
+            // The mandatory peer-as leaf is applied as a separate change
+            // within the same commit, updating the peer type before any
+            // event fires.
+            let peer_type = PeerType::Internal;
+            instance.neighbors.insert(nbr_addr, peer_type);
+
+            event_queue.insert(Event::NeighborUpdate(nbr_addr));
+        }
+        NeighborChange::Delete => {
+            event_queue.insert(Event::NeighborDelete(nbr_addr));
+        }
+        NeighborChange::Entry(change) => {
+            let nbr = instance.neighbors.get_mut(&nbr_addr).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                NeighborEntryChange::Enabled(enabled) => {
+                    nbr.config.enabled = enabled;
+                    event_queue.insert(Event::NeighborUpdate(nbr.remote_addr));
+                }
+                NeighborEntryChange::PeerAs(peer_as) => {
+                    nbr.config.peer_as = peer_as;
+                    nbr.peer_type = if instance.config.asn == nbr.config.peer_as { PeerType::Internal } else { PeerType::External };
+
+                    let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
+                    event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
+                }
+                NeighborEntryChange::LocalAs(local_as) => {
+                    nbr.config.local_as = local_as;
+                }
+                NeighborEntryChange::RemovePrivateAs(private_as_remove) => {
+                    nbr.config.private_as_remove = private_as_remove;
+                }
+                NeighborEntryChange::Description(_description) => {
+                    // Nothing to do.
+                }
+                NeighborEntryChange::TimersConnectRetryInterval(interval) => {
+                    nbr.config.timers.connect_retry_interval = interval;
+                }
+                NeighborEntryChange::TimersHoldTime(holdtime) => {
+                    nbr.config.timers.holdtime = holdtime;
+                }
+                NeighborEntryChange::TimersKeepalive(keepalive) => {
+                    nbr.config.timers.keepalive = keepalive;
+                }
+                NeighborEntryChange::TimersMinAsOriginationInterval(interval) => {
+                    nbr.config.timers.min_as_orig_interval = interval;
+                }
+                NeighborEntryChange::TimersMinRouteAdvertisementInterval(interval) => {
+                    nbr.config.timers.min_route_adv_interval = interval;
+                }
+                NeighborEntryChange::TransportLocalAddress(addr) => {
+                    nbr.config.transport.local_addr = addr;
+
+                    let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
+                    event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
+                }
+                NeighborEntryChange::TransportTcpMss(tcp_mss) => {
+                    nbr.config.transport.tcp_mss = tcp_mss;
+                }
+                NeighborEntryChange::TransportEbgpMultihopEnabled(enabled) => {
+                    nbr.config.transport.ebgp_multihop_enabled = enabled;
+
+                    let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
+                    event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
+                }
+                NeighborEntryChange::TransportEbgpMultihopMultihopTtl(ttl) => {
+                    nbr.config.transport.ebgp_multihop_ttl = ttl;
+
+                    let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
+                    event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
+                }
+                NeighborEntryChange::TransportPassiveMode(passive_mode) => {
+                    nbr.config.transport.passive_mode = passive_mode;
+                }
+                NeighborEntryChange::TransportTtlSecurity(ttl_security) => {
+                    nbr.config.transport.ttl_security = Some(ttl_security);
+
+                    let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
+                    event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
+                }
+                NeighborEntryChange::TransportSecureSessionEnabled(enabled) => {
+                    nbr.config.transport.secure_session_enabled = enabled;
+
+                    let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
+                    event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
+                    event_queue.insert(Event::NeighborUpdateAuth(nbr.remote_addr));
+                }
+                NeighborEntryChange::TransportSecureSessionOptionsMd5KeyString(key) => {
+                    nbr.config.transport.md5_key = key;
+
+                    let msg = NotificationMsg::new(ErrorCode::Cease, CeaseSubcode::OtherConfigurationChange);
+                    event_queue.insert(Event::NeighborReset(nbr.remote_addr, msg));
+                    event_queue.insert(Event::NeighborUpdateAuth(nbr.remote_addr));
+                }
+                NeighborEntryChange::LoggingOptionsLogNeighborStateChanges(log) => {
+                    nbr.config.log_neighbor_state_changes = log;
+                }
+                NeighborEntryChange::AsPathOptionsAllowOwnAs(allow) => {
+                    nbr.config.as_path_options.allow_own_as = allow;
+                }
+                NeighborEntryChange::AsPathOptionsReplacePeerAs(replace) => {
+                    nbr.config.as_path_options.replace_peer_as = replace;
+                }
+                NeighborEntryChange::AsPathOptionsDisablePeerAsFilter(disable) => {
+                    nbr.config.as_path_options.disable_peer_as_filter = disable;
+                }
+                NeighborEntryChange::ApplyPolicyImportPolicy(op, policy) => match op {
+                    ConfigOp::Create => {
+                        nbr.config.apply_policy.import_policy.insert(policy);
+                    }
+                    ConfigOp::Delete => {
+                        nbr.config.apply_policy.import_policy.remove(&policy);
+                    }
+                },
+                NeighborEntryChange::ApplyPolicyDefaultImportPolicy(default) => {
+                    nbr.config.apply_policy.default_import_policy = default;
+                }
+                NeighborEntryChange::ApplyPolicyExportPolicy(op, policy) => match op {
+                    ConfigOp::Create => {
+                        nbr.config.apply_policy.export_policy.insert(policy);
+                    }
+                    ConfigOp::Delete => {
+                        nbr.config.apply_policy.export_policy.remove(&policy);
+                    }
+                },
+                NeighborEntryChange::ApplyPolicyDefaultExportPolicy(default) => {
+                    nbr.config.apply_policy.default_export_policy = default;
+                }
+                NeighborEntryChange::PrefixLimitMaxPrefixes(max) => {
+                    nbr.config.prefix_limit.max_prefixes = max;
+                }
+                NeighborEntryChange::PrefixLimitWarningThresholdPct(threshold) => {
+                    nbr.config.prefix_limit.warning_threshold_pct = threshold;
+                }
+                NeighborEntryChange::PrefixLimitTeardown(teardown) => {
+                    nbr.config.prefix_limit.teardown = teardown;
+                }
+                NeighborEntryChange::PrefixLimitIdleTime(idle_time) => {
+                    nbr.config.prefix_limit.idle_time = idle_time;
+                }
+                NeighborEntryChange::AfiSafi(keys, change) => {
+                    apply_neighbor_afi_safi(nbr, keys.name, change)?;
+                }
+                NeighborEntryChange::TraceOptionsFlag(keys, change) => {
+                    apply_neighbor_trace_options(nbr, keys.name, change, event_queue)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_neighbor_afi_safi(nbr: &mut Neighbor, afi_safi: AfiSafi, change: NeighborAfiSafiChange) -> Result<(), ApplyError> {
+    match change {
+        NeighborAfiSafiChange::Create => {
+            nbr.config.afi_safi.insert(afi_safi, Default::default());
+        }
+        NeighborAfiSafiChange::Delete => {
+            nbr.config.afi_safi.remove(&afi_safi);
+        }
+        NeighborAfiSafiChange::Entry(change) => {
+            let afi_safi_cfg = nbr.config.afi_safi.get_mut(&afi_safi).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                NeighborAfiSafiEntryChange::Enabled(enabled) => {
+                    afi_safi_cfg.enabled = enabled;
+                }
+                NeighborAfiSafiEntryChange::ApplyPolicyImportPolicy(op, policy) => match op {
+                    ConfigOp::Create => {
+                        afi_safi_cfg.apply_policy.import_policy.insert(policy);
+                    }
+                    ConfigOp::Delete => {
+                        afi_safi_cfg.apply_policy.import_policy.remove(&policy);
+                    }
+                },
+                NeighborAfiSafiEntryChange::ApplyPolicyDefaultImportPolicy(default) => {
+                    afi_safi_cfg.apply_policy.default_import_policy = default;
+                }
+                NeighborAfiSafiEntryChange::ApplyPolicyExportPolicy(op, policy) => match op {
+                    ConfigOp::Create => {
+                        afi_safi_cfg.apply_policy.export_policy.insert(policy);
+                    }
+                    ConfigOp::Delete => {
+                        afi_safi_cfg.apply_policy.export_policy.remove(&policy);
+                    }
+                },
+                NeighborAfiSafiEntryChange::ApplyPolicyDefaultExportPolicy(default) => {
+                    afi_safi_cfg.apply_policy.default_export_policy = default;
+                }
+                NeighborAfiSafiEntryChange::Ipv4UnicastPrefixLimitMaxPrefixes(max) | NeighborAfiSafiEntryChange::Ipv6UnicastPrefixLimitMaxPrefixes(max) => {
+                    afi_safi_cfg.prefix_limit.max_prefixes = max;
+                }
+                NeighborAfiSafiEntryChange::Ipv4UnicastPrefixLimitWarningThresholdPct(threshold) | NeighborAfiSafiEntryChange::Ipv6UnicastPrefixLimitWarningThresholdPct(threshold) => {
+                    afi_safi_cfg.prefix_limit.warning_threshold_pct = threshold;
+                }
+                NeighborAfiSafiEntryChange::Ipv4UnicastPrefixLimitTeardown(teardown) | NeighborAfiSafiEntryChange::Ipv6UnicastPrefixLimitTeardown(teardown) => {
+                    afi_safi_cfg.prefix_limit.teardown = teardown;
+                }
+                NeighborAfiSafiEntryChange::Ipv4UnicastPrefixLimitIdleTime(idle_time) | NeighborAfiSafiEntryChange::Ipv6UnicastPrefixLimitIdleTime(idle_time) => {
+                    afi_safi_cfg.prefix_limit.idle_time = idle_time;
+                }
+                NeighborAfiSafiEntryChange::Ipv4UnicastSendDefaultRoute(send) | NeighborAfiSafiEntryChange::Ipv6UnicastSendDefaultRoute(send) => {
+                    afi_safi_cfg.send_default_route = send;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_neighbor_trace_options(nbr: &mut Neighbor, trace_opt: NeighborTraceOption, change: NeighborTraceOptionsFlagChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    let trace_opts = &mut nbr.config.trace_opts;
+    match change {
+        NeighborTraceOptionsFlagChange::Create => match trace_opt {
+            NeighborTraceOption::Events => trace_opts.events = Some(true),
+            NeighborTraceOption::PacketsAll => {
+                trace_opts.packets.all.get_or_insert_default();
+            }
+            NeighborTraceOption::PacketsOpen => {
+                trace_opts.packets.open.get_or_insert_default();
+            }
+            NeighborTraceOption::PacketsUpdate => {
+                trace_opts.packets.update.get_or_insert_default();
+            }
+            NeighborTraceOption::PacketsNotification => {
+                trace_opts.packets.notification.get_or_insert_default();
+            }
+            NeighborTraceOption::PacketsKeepalive => {
+                trace_opts.packets.keepalive.get_or_insert_default();
+            }
+            NeighborTraceOption::PacketsRefresh => {
+                trace_opts.packets.refresh.get_or_insert_default();
+            }
+        },
+        NeighborTraceOptionsFlagChange::Delete => match trace_opt {
+            NeighborTraceOption::Events => trace_opts.events = None,
+            NeighborTraceOption::PacketsAll => trace_opts.packets.all = None,
+            NeighborTraceOption::PacketsOpen => trace_opts.packets.open = None,
+            NeighborTraceOption::PacketsUpdate => trace_opts.packets.update = None,
+            NeighborTraceOption::PacketsNotification => trace_opts.packets.notification = None,
+            NeighborTraceOption::PacketsKeepalive => trace_opts.packets.keepalive = None,
+            NeighborTraceOption::PacketsRefresh => trace_opts.packets.refresh = None,
+        },
+        NeighborTraceOptionsFlagChange::Entry(change) => {
+            let trace_opt_packet = match trace_opt {
+                NeighborTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
+                NeighborTraceOption::PacketsOpen => trace_opts.packets.open.as_mut(),
+                NeighborTraceOption::PacketsUpdate => trace_opts.packets.update.as_mut(),
+                NeighborTraceOption::PacketsNotification => trace_opts.packets.notification.as_mut(),
+                NeighborTraceOption::PacketsKeepalive => trace_opts.packets.keepalive.as_mut(),
+                NeighborTraceOption::PacketsRefresh => trace_opts.packets.refresh.as_mut(),
+                _ => None,
+            };
+            let Some(trace_opt_packet) = trace_opt_packet else {
+                return Ok(());
+            };
+            match change {
+                NeighborTraceOptionsFlagEntryChange::Send(enable) => {
+                    trace_opt_packet.tx = enable;
+                }
+                NeighborTraceOptionsFlagEntryChange::Receive(enable) => {
+                    trace_opt_packet.rx = enable;
+                }
+            }
+        }
+    }
+    event_queue.insert(Event::UpdateTraceOptions);
+
+    Ok(())
+}
+
+fn process_event(instance: &mut Instance, event: Event) {
+    match event {
+        Event::InstanceUpdate => instance.update(),
+        Event::NeighborUpdate(nbr_addr) => {
+            let Some((mut instance, neighbors)) = instance.as_up() else {
+                return;
+            };
+            let nbr = neighbors.get_mut(&nbr_addr).unwrap();
+
+            if nbr.config.enabled {
+                nbr.fsm_event(&mut instance, fsm::Event::Start);
+            } else {
+                let error_code = ErrorCode::Cease;
+                let error_subcode = CeaseSubcode::AdministrativeShutdown;
+                let msg = NotificationMsg::new(error_code, error_subcode);
+                nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
+            }
+        }
+        Event::NeighborDelete(nbr_addr) => {
+            let Some((mut instance, neighbors)) = instance.as_up() else {
+                return;
+            };
+            let nbr = neighbors.get_mut(&nbr_addr).unwrap();
+
+            // Unset neighbor's password in the listening sockets.
+            for listener in instance.state.listening_sockets.iter().filter(|listener| listener.af == nbr_addr.address_family()) {
+                network::listen_socket_md5sig_update(&listener.socket, &nbr_addr, None);
+            }
+
+            // Delete neighbor.
+            let error_code = ErrorCode::Cease;
+            let error_subcode = CeaseSubcode::PeerDeConfigured;
+            let msg = NotificationMsg::new(error_code, error_subcode);
+            nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
+            neighbors.remove(&nbr_addr);
+        }
+        Event::NeighborReset(nbr_addr, msg) => {
+            let Some((mut instance, neighbors)) = instance.as_up() else {
+                return;
+            };
+            let nbr = neighbors.get_mut(&nbr_addr).unwrap();
+
+            nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
+        }
+        Event::NeighborUpdateAuth(nbr_addr) => {
+            let Some((instance, neighbors)) = instance.as_up() else {
+                return;
+            };
+            let nbr = neighbors.get_mut(&nbr_addr).unwrap();
+
+            // Get neighbor password.
+            let key = if nbr.config.transport.secure_session_enabled
+                && let Some(key) = &nbr.config.transport.md5_key
+            {
+                Some(key.clone())
+            } else {
+                None
+            };
+
+            // Set/unset password in the listening sockets.
+            for listener in instance.state.listening_sockets.iter().filter(|listener| listener.af == nbr_addr.address_family()) {
+                network::listen_socket_md5sig_update(&listener.socket, &nbr_addr, key.as_deref());
+            }
+        }
+        Event::RedistributeIbusSub(protocol, af) => {
+            instance.tx.ibus.route_redistribute_sub(protocol, Some(af));
+        }
+        Event::RedistributeDelete(protocol, af, afi_safi) => {
+            instance.tx.ibus.route_redistribute_unsub(protocol, Some(af));
+
+            if let Some((mut instance, _)) = instance.as_up() {
+                match afi_safi {
+                    AfiSafi::Ipv4Unicast => {
+                        redistribute_delete::<Ipv4Unicast>(&mut instance, protocol);
+                    }
+                    AfiSafi::Ipv6Unicast => {
+                        redistribute_delete::<Ipv6Unicast>(&mut instance, protocol);
+                    }
+                }
+            }
+        }
+        Event::UpdateTraceOptions => {
+            for nbr in instance.neighbors.values_mut() {
+                let nbr_trace_opts = &nbr.config.trace_opts;
+                let instance_trace_opts = &instance.config.trace_opts;
+
+                let disabled = TraceOptionPacketType {
+                    tx: false,
+                    rx: false,
+                };
+                let open = nbr_trace_opts
+                    .packets
+                    .open
+                    .or(nbr_trace_opts.packets.all)
+                    .or(instance_trace_opts.packets.open)
+                    .or(instance_trace_opts.packets.all)
+                    .unwrap_or(disabled);
+                let update = nbr_trace_opts
+                    .packets
+                    .update
+                    .or(nbr_trace_opts.packets.all)
+                    .or(instance_trace_opts.packets.update)
+                    .or(instance_trace_opts.packets.all)
+                    .unwrap_or(disabled);
+                let notification = nbr_trace_opts
+                    .packets
+                    .notification
+                    .or(nbr_trace_opts.packets.all)
+                    .or(instance_trace_opts.packets.notification)
+                    .or(instance_trace_opts.packets.all)
+                    .unwrap_or(disabled);
+                let keepalive = nbr_trace_opts
+                    .packets
+                    .keepalive
+                    .or(nbr_trace_opts.packets.all)
+                    .or(instance_trace_opts.packets.keepalive)
+                    .or(instance_trace_opts.packets.all)
+                    .unwrap_or(disabled);
+                let refresh = nbr_trace_opts
+                    .packets
+                    .refresh
+                    .or(nbr_trace_opts.packets.all)
+                    .or(instance_trace_opts.packets.refresh)
+                    .or(instance_trace_opts.packets.all)
+                    .unwrap_or(disabled);
+
+                nbr.config.trace_opts.events_resolved = nbr_trace_opts.events.unwrap_or(instance_trace_opts.events);
+                nbr.config.trace_opts.packets_resolved.store(Arc::new(TraceOptionPacketResolved {
+                    open,
+                    update,
+                    notification,
+                    keepalive,
+                    refresh,
+                }));
+            }
+        }
+    }
+}
+
+fn redistribute_delete<A>(instance: &mut InstanceUpView<'_>, protocol: Protocol)
+where
+    A: crate::af::AddressFamily,
+{
+    let table = A::table(&mut instance.state.rib.tables);
+    for (prefix, dest) in table.prefixes.iter_mut() {
+        let Some(route) = &dest.redistribute else {
+            continue;
+        };
+        if route.origin != RouteOrigin::Protocol(protocol) {
+            continue;
+        }
+
+        // Remove redistributed route.
+        dest.redistribute = None;
+
+        // Enqueue prefix for the BGP Decision Process.
+        table.queued_prefixes.insert(prefix);
+    }
+
+    // Schedule the BGP Decision Process.
+    instance.state.schedule_decision_process(instance.tx);
 }
 
 // ===== impl Instance =====
 
 impl Provider for Instance {
-    type ListEntry = ListEntry;
     type Event = Event;
     type Resource = Resource;
+    type Change = ConfigChange;
 
-    fn callbacks() -> &'static Callbacks<Instance> {
-        &CALLBACKS
+    const YANG_OPS_CONFIG: YangConfigOps<ConfigChange> = config::YANG_OPS_CONFIG;
+
+    fn apply(&mut self, change: ConfigChange, _resource: &mut Option<Resource>, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+        apply_instance(self, change, event_queue)
     }
 
     fn process_event(&mut self, event: Event) {
-        match event {
-            Event::InstanceUpdate => self.update(),
-            Event::NeighborUpdate(nbr_addr) => {
-                let Some((mut instance, neighbors)) = self.as_up() else {
-                    return;
-                };
-                let nbr = neighbors.get_mut(&nbr_addr).unwrap();
-
-                if nbr.config.enabled {
-                    nbr.fsm_event(&mut instance, fsm::Event::Start);
-                } else {
-                    let error_code = ErrorCode::Cease;
-                    let error_subcode = CeaseSubcode::AdministrativeShutdown;
-                    let msg = NotificationMsg::new(error_code, error_subcode);
-                    nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
-                }
-            }
-            Event::NeighborDelete(nbr_addr) => {
-                let Some((mut instance, neighbors)) = self.as_up() else {
-                    return;
-                };
-                let nbr = neighbors.get_mut(&nbr_addr).unwrap();
-
-                // Unset neighbor's password in the listening sockets.
-                for listener in instance.state.listening_sockets.iter().filter(|listener| listener.af == nbr_addr.address_family()) {
-                    network::listen_socket_md5sig_update(&listener.socket, &nbr_addr, None);
-                }
-
-                // Delete neighbor.
-                let error_code = ErrorCode::Cease;
-                let error_subcode = CeaseSubcode::PeerDeConfigured;
-                let msg = NotificationMsg::new(error_code, error_subcode);
-                nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
-                neighbors.remove(&nbr_addr);
-            }
-            Event::NeighborReset(nbr_addr, msg) => {
-                let Some((mut instance, neighbors)) = self.as_up() else {
-                    return;
-                };
-                let nbr = neighbors.get_mut(&nbr_addr).unwrap();
-
-                nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
-            }
-            Event::NeighborUpdateAuth(nbr_addr) => {
-                let Some((instance, neighbors)) = self.as_up() else {
-                    return;
-                };
-                let nbr = neighbors.get_mut(&nbr_addr).unwrap();
-
-                // Get neighbor password.
-                let key = if nbr.config.transport.secure_session_enabled
-                    && let Some(key) = &nbr.config.transport.md5_key
-                {
-                    Some(key.clone())
-                } else {
-                    None
-                };
-
-                // Set/unset password in the listening sockets.
-                for listener in instance.state.listening_sockets.iter().filter(|listener| listener.af == nbr_addr.address_family()) {
-                    network::listen_socket_md5sig_update(&listener.socket, &nbr_addr, key.as_deref());
-                }
-            }
-            Event::RedistributeIbusSub(protocol, af) => {
-                self.tx.ibus.route_redistribute_sub(protocol, Some(af));
-            }
-            Event::RedistributeDelete(protocol, af, afi_safi) => {
-                self.tx.ibus.route_redistribute_unsub(protocol, Some(af));
-
-                if let Some((mut instance, _)) = self.as_up() {
-                    match afi_safi {
-                        AfiSafi::Ipv4Unicast => {
-                            redistribute_delete::<Ipv4Unicast>(&mut instance, protocol);
-                        }
-                        AfiSafi::Ipv6Unicast => {
-                            redistribute_delete::<Ipv6Unicast>(&mut instance, protocol);
-                        }
-                    }
-                }
-            }
-            Event::UpdateTraceOptions => {
-                for nbr in self.neighbors.values_mut() {
-                    let nbr_trace_opts = &nbr.config.trace_opts;
-                    let instance_trace_opts = &self.config.trace_opts;
-
-                    let disabled = TraceOptionPacketType {
-                        tx: false,
-                        rx: false,
-                    };
-                    let open = nbr_trace_opts
-                        .packets
-                        .open
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.open)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-                    let update = nbr_trace_opts
-                        .packets
-                        .update
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.update)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-                    let notification = nbr_trace_opts
-                        .packets
-                        .notification
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.notification)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-                    let keepalive = nbr_trace_opts
-                        .packets
-                        .keepalive
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.keepalive)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-                    let refresh = nbr_trace_opts
-                        .packets
-                        .refresh
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.refresh)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-
-                    nbr.config.trace_opts.events_resolved = nbr_trace_opts.events.unwrap_or(instance_trace_opts.events);
-                    nbr.config.trace_opts.packets_resolved.store(Arc::new(TraceOptionPacketResolved {
-                        open,
-                        update,
-                        notification,
-                        keepalive,
-                        refresh,
-                    }));
-                }
-            }
-        }
+        process_event(self, event);
     }
 }
 
@@ -1676,32 +984,6 @@ impl TraceOptionPacketResolved {
             Message::RouteRefresh(_) => self.refresh.rx,
         }
     }
-}
-
-// ===== helper functions =====
-
-fn redistribute_delete<A>(instance: &mut InstanceUpView<'_>, protocol: Protocol)
-where
-    A: crate::af::AddressFamily,
-{
-    let table = A::table(&mut instance.state.rib.tables);
-    for (prefix, dest) in table.prefixes.iter_mut() {
-        let Some(route) = &dest.redistribute else {
-            continue;
-        };
-        if route.origin != RouteOrigin::Protocol(protocol) {
-            continue;
-        }
-
-        // Remove redistributed route.
-        dest.redistribute = None;
-
-        // Enqueue prefix for the BGP Decision Process.
-        table.queued_prefixes.insert(prefix);
-    }
-
-    // Schedule the BGP Decision Process.
-    instance.state.schedule_decision_process(instance.tx);
 }
 
 // ===== configuration defaults =====

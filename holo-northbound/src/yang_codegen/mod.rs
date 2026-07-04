@@ -5,6 +5,7 @@
 //
 
 pub mod code_writer;
+pub mod config_builder;
 pub mod struct_builder;
 pub mod types;
 
@@ -42,6 +43,17 @@ use holo_northbound::NbDaemonSender;
 use holo_northbound::state::{self, ListEntryKind, YangList, YangListOps, YangContainer, YangContainerOps};
 use holo_northbound::rpc::{self, YangRpc, YangRpcObject, YangRpcOps};
 use phf::phf_map;
+use super::*;
+
+"#;
+
+const HEADER_YANG_CONFIG: &str = r#"
+use holo_northbound::configuration::{ChangeOp, ConfigChangeParseFn, ConfigOp, YangConfigOps};
+use holo_northbound::error::ParseError;
+use holo_utils::yang::{DataNodeRefExt, SchemaNodeExt};
+use holo_yang::TryFromYang;
+use phf::phf_map;
+use yang5::data::{Data, DataNodeRef};
 use super::*;
 
 "#;
@@ -668,6 +680,19 @@ pub fn build_yang_ops(
     let output = HEADER_YANG_OPS.to_owned();
     let mut w = CodeWriter::new(output, 0);
     generate_yang_ops(&mut w, modules, yang_ctx, path_filter)
+        .expect("Failed to write to stdout");
+    write_out_dir_file(filename, &w.output);
+}
+
+pub fn build_yang_config(
+    yang_ctx: &Context,
+    modules: &[&str],
+    path_root: Option<&str>,
+    filename: &str,
+) {
+    let output = HEADER_YANG_CONFIG.to_owned();
+    let mut w = CodeWriter::new(output, 0);
+    config_builder::generate_yang_config(&mut w, yang_ctx, modules, path_root)
         .expect("Failed to write to stdout");
     write_out_dir_file(filename, &w.output);
 }

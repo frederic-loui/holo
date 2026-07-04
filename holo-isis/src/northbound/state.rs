@@ -60,7 +60,7 @@ impl<'a> YangContainer<'a, Instance> for isis::Isis {
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::spf_control::ietf_spf_delay::level::Level<'a> {
+impl<'a> YangList<'a, Instance> for isis::spf_control::ietf_spf_delay::level::Level {
     type ParentListEntry = ();
     type ListEntry = (LevelNumber, &'a SpfScheduler);
 
@@ -73,7 +73,7 @@ impl<'a> YangList<'a, Instance> for isis::spf_control::ietf_spf_delay::level::Le
     fn new(_instance: &'a Instance, (level, spf_sched): &Self::ListEntry) -> Self {
         Self {
             level: *level as u8,
-            current_state: Some(spf_sched.delay_state.to_yang()),
+            current_state: Some(spf_sched.delay_state),
             remaining_time_to_learn: spf_sched.learn_timer.as_ref().map(|task| TimerValueMillis(task.remaining())).ignore_in_testing(),
             remaining_hold_down: spf_sched.hold_down_timer.as_ref().map(|task| TimerValueMillis(task.remaining())).ignore_in_testing(),
             last_event_received: spf_sched.last_event_rcvd.map(Timeticks).ignore_in_testing(),
@@ -83,7 +83,7 @@ impl<'a> YangList<'a, Instance> for isis::spf_control::ietf_spf_delay::level::Le
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::spf_log::event::Event<'a> {
+impl<'a> YangList<'a, Instance> for isis::spf_log::event::Event {
     type ParentListEntry = ();
     type ListEntry = &'a SpfLogEntry;
 
@@ -96,7 +96,7 @@ impl<'a> YangList<'a, Instance> for isis::spf_log::event::Event<'a> {
     fn new(_instance: &'a Instance, log: &Self::ListEntry) -> Self {
         Self {
             id: log.id,
-            spf_type: Some(log.spf_type.to_yang()),
+            spf_type: Some(log.spf_type),
             level: Some(log.level as u8),
             schedule_timestamp: log.schedule_time.map(Timeticks),
             start_timestamp: Some(Timeticks(log.start_time)),
@@ -122,7 +122,7 @@ impl<'a> YangList<'a, Instance> for isis::spf_log::event::trigger_lsp::TriggerLs
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::lsp_log::event::Event<'a> {
+impl<'a> YangList<'a, Instance> for isis::lsp_log::event::Event {
     type ParentListEntry = ();
     type ListEntry = &'a LspLogEntry;
 
@@ -137,7 +137,7 @@ impl<'a> YangList<'a, Instance> for isis::lsp_log::event::Event<'a> {
             id: log.id,
             level: Some(log.level as u8),
             received_timestamp: log.rcvd_time.map(Timeticks).ignore_in_testing(),
-            reason: Some(log.reason.to_yang()),
+            reason: Some(log.reason),
         }
     }
 }
@@ -243,8 +243,8 @@ impl<'a> YangContainer<'a, Instance> for isis::database::levels::lsp::authentica
         let lsp = &lse.data;
         let auth_tlv = lsp.tlvs.auth.as_ref()?;
         let authentication_type = match auth_tlv {
-            AuthenticationTlv::ClearText(..) => Some(CryptoAlgo::ClearText.to_yang()),
-            AuthenticationTlv::HmacMd5(..) => Some(CryptoAlgo::HmacMd5.to_yang()),
+            AuthenticationTlv::ClearText(..) => Some(CryptoAlgo::ClearText),
+            AuthenticationTlv::HmacMd5(..) => Some(CryptoAlgo::HmacMd5),
             AuthenticationTlv::Cryptographic {
                 ..
             } => {
@@ -410,7 +410,7 @@ impl<'a> YangContainer<'a, Instance> for isis::database::levels::lsp::router_cap
 
     fn new(_instance: &'a Instance, router_cap: &Self::ParentListEntry) -> Option<Self> {
         let sr_algo = &router_cap.sub_tlvs.sr_algo.as_ref()?;
-        let iter = sr_algo.get().iter().map(|algo| algo.to_yang());
+        let iter = sr_algo.get().iter().copied();
         Some(Self {
             sr_algorithm: Some(Box::new(iter)),
         })
@@ -436,7 +436,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::router_capabili
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::router_capabilities::router_capability::fad_tlvs::fad_tlv::FadTlv<'a> {
+impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::router_capabilities::router_capability::fad_tlvs::fad_tlv::FadTlv {
     type ParentListEntry = &'a RouterCapTlv;
     type ListEntry = &'a FadStlv;
 
@@ -448,8 +448,8 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::router_capabili
     fn new(_instance: &'a Instance, fad: &Self::ListEntry) -> Self {
         Self {
             algo_number: Some(fad.flex_algo),
-            metric_type: IgpMetricType::from_u8(fad.metric_type).map(|t| t.to_yang()),
-            calc_type: IgpAlgoType::from_u8(fad.calc_type).map(|t| t.to_yang()),
+            metric_type: IgpMetricType::from_u8(fad.metric_type),
+            calc_type: IgpAlgoType::from_u8(fad.calc_type),
             priority: Some(fad.priority),
         }
     }
@@ -1244,7 +1244,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::extended_ipv4_r
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::extended_ipv4_reachability::prefixes::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a> {
+impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::extended_ipv4_reachability::prefixes::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv {
     type ParentListEntry = &'a Ipv4Reach;
     type ListEntry = &'a PrefixSidStlv;
 
@@ -1255,7 +1255,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::extended_ipv4_r
 
     fn new(_instance: &'a Instance, stlv: &Self::ListEntry) -> Self {
         Self {
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -1776,7 +1776,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::mt_extended_ipv
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::mt_extended_ipv4_reachability::prefixes::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a> {
+impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::mt_extended_ipv4_reachability::prefixes::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv {
     type ParentListEntry = (u16, &'a Ipv4Reach);
     type ListEntry = &'a PrefixSidStlv;
 
@@ -1787,7 +1787,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::mt_extended_ipv
 
     fn new(_instance: &'a Instance, stlv: &Self::ListEntry) -> Self {
         Self {
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -1865,7 +1865,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::mt_ipv6_reachab
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::mt_ipv6_reachability::prefixes::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a> {
+impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::mt_ipv6_reachability::prefixes::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv {
     type ParentListEntry = (u16, &'a Ipv6Reach);
     type ListEntry = &'a PrefixSidStlv;
 
@@ -1876,7 +1876,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::mt_ipv6_reachab
 
     fn new(_instance: &'a Instance, stlv: &Self::ListEntry) -> Self {
         Self {
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -1953,7 +1953,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::ipv6_reachabili
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::ipv6_reachability::prefixes::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a> {
+impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::ipv6_reachability::prefixes::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv {
     type ParentListEntry = &'a Ipv6Reach;
     type ListEntry = &'a PrefixSidStlv;
 
@@ -1964,7 +1964,7 @@ impl<'a> YangList<'a, Instance> for isis::database::levels::lsp::ipv6_reachabili
 
     fn new(_instance: &'a Instance, stlv: &Self::ListEntry) -> Self {
         Self {
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -2222,7 +2222,7 @@ impl<'a> YangList<'a, Instance> for isis::interfaces::interface::adjacencies::ad
     }
 }
 
-impl<'a> YangList<'a, Instance> for isis::interfaces::interface::adjacencies::adjacency::adjacency_sid::AdjacencySid<'a> {
+impl<'a> YangList<'a, Instance> for isis::interfaces::interface::adjacencies::adjacency::adjacency_sid::AdjacencySid {
     type ParentListEntry = &'a Adjacency;
     type ListEntry = &'a AdjacencySid;
 
@@ -2234,7 +2234,7 @@ impl<'a> YangList<'a, Instance> for isis::interfaces::interface::adjacencies::ad
     fn new(_instance: &'a Instance, adj_sid: &Self::ListEntry) -> Self {
         Self {
             value: Some(adj_sid.label.get()),
-            address_family: Some(adj_sid.af.to_yang()),
+            address_family: Some(adj_sid.af),
             weight: Some(0),
             protection_requested: Some(false),
         }

@@ -1,0 +1,52 @@
+module holo-ietf-bfd-ip-mh-deviations {
+  yang-version 1.1;
+  namespace "http://holo-routing.org/yang/holo-ietf-bfd-ip-mh-deviations";
+  prefix holo-ietf-bfd-ip-mh-deviations;
+
+  import ietf-routing {
+    prefix rt;
+  }
+
+  import ietf-bfd {
+    prefix bfd;
+  }
+
+  import ietf-bfd-ip-mh {
+    prefix bfd-ip-mh;
+  }
+
+  organization
+    "Holo Routing Stack";
+
+  description
+    "This module defines deviation statements for the ietf-bfd-ip-mh
+     module.";
+
+  /*
+   * Added constraints
+   */
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/bfd:bfd/bfd-ip-mh:ip-mh/bfd-ip-mh:session-groups/bfd-ip-mh:session-group/bfd-ip-mh:interval-config-type/bfd-ip-mh:tx-rx-intervals/bfd-ip-mh:desired-min-tx-interval" {
+    deviate replace {
+      type uint32 {
+        range "50000..max";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/bfd:bfd/bfd-ip-mh:ip-mh/bfd-ip-mh:session-groups/bfd-ip-mh:session-group/bfd-ip-mh:interval-config-type/bfd-ip-mh:tx-rx-intervals/bfd-ip-mh:required-min-rx-interval" {
+    deviate replace {
+      type uint32 {
+        range "50000..max";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/bfd:bfd/bfd-ip-mh:ip-mh/bfd-ip-mh:session-groups/bfd-ip-mh:session-group/bfd-ip-mh:interval-config-type/bfd-ip-mh:single-interval/bfd-ip-mh:min-interval" {
+    deviate replace {
+      type uint32 {
+        range "50000..max";
+      }
+    }
+  }
+}

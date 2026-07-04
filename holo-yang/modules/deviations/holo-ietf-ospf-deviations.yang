@@ -11,6 +11,14 @@ module holo-ietf-ospf-deviations {
     prefix ospf;
   }
 
+  import ietf-key-chain {
+    prefix key-chain;
+  }
+
+  import holo-ospf {
+    prefix holo-ospf;
+  }
+
   organization
     "Holo Routing Stack";
 
@@ -175,6 +183,83 @@ module holo-ietf-ospf-deviations {
   deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/ospf:areas/ospf:area/ospf:interfaces/ospf:interface/ospf:lls" {
     deviate add {
       default "false";
+    }
+  }
+
+  /*
+   * Added constraints
+   */
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/ospf:areas/ospf:area/ospf:area-type" {
+    deviate add {
+      must 'derived-from-or-self(., "ospf:normal-area") or derived-from-or-self(., "ospf:stub-area")' {
+        error-message
+          "Unsupported area type.";
+      }
+      must 'derived-from-or-self(., "ospf:normal-area") or ../ospf:area-id != "0.0.0.0"' {
+        error-message
+          "The type of the backbone area can't be changed.";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/ospf:areas/ospf:area/ospf:interfaces/ospf:interface/ospf:authentication/ospf:auth-type-selection/ospf:ospfv2-auth/ospf:ospfv2-auth-specification/ospf:auth-key-explicit/ospf:ospfv2-crypto-algorithm" {
+    deviate add {
+      must 'derived-from-or-self(., "key-chain:md5") or derived-from-or-self(., "key-chain:hmac-sha-1") or derived-from-or-self(., "key-chain:hmac-sha-256") or derived-from-or-self(., "key-chain:hmac-sha-384") or derived-from-or-self(., "key-chain:hmac-sha-512")' {
+        error-message
+          "Unsupported cryptographic algorithm.";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/ospf:areas/ospf:area/ospf:interfaces/ospf:interface/ospf:authentication/ospf:auth-type-selection/ospf:ospfv3-auth-trailer/ospf:ospfv3-auth-specification/ospf:auth-key-explicit/ospf:ospfv3-crypto-algorithm" {
+    deviate add {
+      must 'derived-from-or-self(., "key-chain:hmac-sha-1") or derived-from-or-self(., "key-chain:hmac-sha-256") or derived-from-or-self(., "key-chain:hmac-sha-384") or derived-from-or-self(., "key-chain:hmac-sha-512")' {
+        error-message
+          "Unsupported cryptographic algorithm.";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/ospf:areas/ospf:area/ospf:virtual-links/ospf:virtual-link/ospf:authentication/ospf:auth-type-selection/ospf:ospfv2-auth/ospf:ospfv2-auth-specification/ospf:auth-key-explicit/ospf:ospfv2-crypto-algorithm" {
+    deviate add {
+      must 'derived-from-or-self(., "key-chain:md5") or derived-from-or-self(., "key-chain:hmac-sha-1") or derived-from-or-self(., "key-chain:hmac-sha-256") or derived-from-or-self(., "key-chain:hmac-sha-384") or derived-from-or-self(., "key-chain:hmac-sha-512")' {
+        error-message
+          "Unsupported cryptographic algorithm.";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/ospf:areas/ospf:area/ospf:virtual-links/ospf:virtual-link/ospf:authentication/ospf:auth-type-selection/ospf:ospfv3-auth-trailer/ospf:ospfv3-auth-specification/ospf:auth-key-explicit/ospf:ospfv3-crypto-algorithm" {
+    deviate add {
+      must 'derived-from-or-self(., "key-chain:hmac-sha-1") or derived-from-or-self(., "key-chain:hmac-sha-256") or derived-from-or-self(., "key-chain:hmac-sha-384") or derived-from-or-self(., "key-chain:hmac-sha-512")' {
+        error-message
+          "Unsupported cryptographic algorithm.";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/holo-ospf:instance-id" {
+    deviate add {
+      must '((../ospf:address-family = "ipv6" or '
+         + 'not(../ospf:address-family)) and . <= 31) or '
+         + '(../ospf:address-family = "ipv4" and '
+         + '. >= 64 and . <= 95)' {
+        error-message
+          "The instance ID isn't valid for the configured address family.";
+      }
+    }
+  }
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/ospf:areas/ospf:area/ospf:interfaces/ospf:interface/ospf:instance-id" {
+    deviate add {
+      must '((../../../../../ospf:address-family = "ipv6" or '
+         + 'not(../../../../../ospf:address-family)) and . <= 31) or '
+         + '(../../../../../ospf:address-family = "ipv4" and '
+         + '. >= 64 and . <= 95)' {
+        error-message
+          "The instance ID isn't valid for the configured address family.";
+      }
     }
   }
 

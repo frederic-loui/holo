@@ -64,12 +64,12 @@ pub enum AdvertisementType {
 
 // ===== YANG impls =====
 
-impl<'a> YangContainer<'a, Instance> for mpls_ldp::global::address_families::ipv4::Ipv4<'a> {
+impl<'a> YangContainer<'a, Instance> for mpls_ldp::global::address_families::ipv4::Ipv4 {
     type ParentListEntry = ();
 
     fn new(_instance: &'a Instance, _: &Self::ParentListEntry) -> Option<Self> {
         Some(Self {
-            label_distribution_control_mode: Some(LabelDistMode::Independent.to_yang()),
+            label_distribution_control_mode: Some(LabelDistMode::Independent),
         })
     }
 }
@@ -137,7 +137,7 @@ impl<'a> YangList<'a, Instance> for mpls_ldp::global::address_families::ipv4::bi
     }
 }
 
-impl<'a> YangList<'a, Instance> for mpls_ldp::global::address_families::ipv4::bindings::fec_label::peer::Peer<'a> {
+impl<'a> YangList<'a, Instance> for mpls_ldp::global::address_families::ipv4::bindings::fec_label::peer::Peer {
     type ParentListEntry = &'a Fec;
     type ListEntry = LabelBinding;
 
@@ -166,7 +166,7 @@ impl<'a> YangList<'a, Instance> for mpls_ldp::global::address_families::ipv4::bi
             lsr_id: binding.lsr_id,
             label_space_id: 0,
             advertisement_type: binding.adv_type,
-            label: Some(binding.label.to_yang()),
+            label: Some(binding.label),
             used_in_forwarding: Some(binding.used_in_fwd),
         }
     }
@@ -302,7 +302,7 @@ impl<'a> YangContainer<'a, Instance> for mpls_ldp::discovery::targeted::address_
     }
 }
 
-impl<'a> YangList<'a, Instance> for mpls_ldp::peers::peer::Peer<'a> {
+impl<'a> YangList<'a, Instance> for mpls_ldp::peers::peer::Peer {
     type ParentListEntry = ();
     type ListEntry = &'a Neighbor;
 
@@ -317,7 +317,7 @@ impl<'a> YangList<'a, Instance> for mpls_ldp::peers::peer::Peer<'a> {
             lsr_id: nbr.lsr_id,
             label_space_id: 0,
             next_keep_alive: nbr.next_kalive().map(|d| d.as_secs().saturating_into()).ignore_in_testing(),
-            session_state: Some(nbr.state.to_yang()),
+            session_state: Some(nbr.state),
             up_time: nbr.uptime.map(Timeticks64).ignore_in_testing(),
         }
     }

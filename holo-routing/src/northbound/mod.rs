@@ -19,13 +19,25 @@ use crate::northbound::yang_gen::control_plane_protocol;
 #[allow(unused_imports, unused_variables)]
 #[allow(clippy::module_inception)]
 pub mod yang_gen {
+    use holo_utils::bier::{BierEncapsulationType, Bsl, UnderlayProtocolType};
+    use holo_utils::ip::AddressFamily;
+    use holo_utils::mpls::Label;
+    use holo_utils::protocol::Protocol;
+    use holo_utils::southbound::{IsisRouteType, OspfRouteType};
+    use holo_utils::sr::{IgpAlgoType, SidLastHopBehavior};
     pub use routing::control_plane_protocols::control_plane_protocol;
+
+    use crate::northbound::configuration::NexthopSpecial;
 
     include!(concat!(env!("OUT_DIR"), "/yang_objects.rs"));
     pub mod ops {
         use crate::Master;
         type Provider = Master;
         include!(concat!(env!("OUT_DIR"), "/yang_ops.rs"));
+    }
+    pub mod config {
+        use super::*;
+        include!(concat!(env!("OUT_DIR"), "/yang_config.rs"));
     }
 }
 

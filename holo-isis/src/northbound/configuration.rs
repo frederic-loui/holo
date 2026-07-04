@@ -9,54 +9,38 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::{Arc, LazyLock as Lazy};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use enum_as_inner::EnumAsInner;
-use holo_northbound::configuration::{Callbacks, CallbacksBuilder, InheritableConfig, Provider, ValidationCallbacks, ValidationCallbacksBuilder};
+use holo_northbound::configuration::{ConfigOp, InheritableConfig, Provider, YangConfigOps};
+use holo_northbound::error::ApplyError;
 use holo_utils::bfd;
 use holo_utils::crypto::CryptoAlgo;
 use holo_utils::ip::{AddressFamily, IpNetworkKind};
 use holo_utils::keychain::{Key, Keychains};
 use holo_utils::mac_addr::MacAddr;
 use holo_utils::protocol::Protocol;
-use holo_utils::yang::DataNodeRefExt;
-use holo_yang::types::HexString;
-use holo_yang::{ToYang, TryFromYang};
+use holo_yang::TryFromYang;
 use ipnetwork::IpNetwork;
 use prefix_trie::joint::map::JointPrefixMap;
 
 use crate::collections::InterfaceIndex;
 use crate::debug::InterfaceInactiveReason;
 use crate::instance::Instance;
-use crate::interface::InterfaceType;
+use crate::interface::{Interface, InterfaceType};
 use crate::northbound::notification;
+use crate::northbound::yang_gen::config::{
+    self, AddressFamilyListChange, AddressFamilyListEntryChange, AddressFamilyListRedistributionChange, ConfigChange, InterLevelPropagationPoliciesLevel1ToLevel2SummaryPrefixesChange,
+    InterLevelPropagationPoliciesLevel1ToLevel2SummaryPrefixesEntryChange, InterfaceAddressFamilyListChange, InterfaceChange, InterfaceEntryChange, InterfaceIsisAslaInterfaceAslaChange, InterfaceIsisAslaInterfaceAslaEntryChange,
+    InterfaceTopologyChange, InterfaceTopologyEntryChange, InterfaceTraceOptionsFlagChange, InterfaceTraceOptionsFlagEntryChange, NodeTagChange, SpbServiceChange, SpbServiceEntryChange, SpbServiceIsidChange, SpbServiceIsidEntryChange,
+    TopologyChange, TopologyEntryChange, TraceOptionsFlagChange, TraceOptionsFlagEntryChange,
+};
 use crate::northbound::yang_gen::isis;
 use crate::packet::auth::AuthMethod;
 use crate::packet::iana::{AslaSabmFlags, FloodingAlgo, MtId, PduType};
 use crate::packet::{AreaAddr, LevelNumber, LevelType, LevelTypeIterator, SystemId};
 use crate::route::RouteFlags;
 use crate::{ibus, spf, sr};
-
-#[derive(Debug, Default)]
-#[derive(EnumAsInner)]
-pub enum ListEntry {
-    #[default]
-    None,
-    Summary(IpNetwork),
-    AddressFamily(AddressFamily),
-    Redistribution(AddressFamily, LevelNumber, Protocol),
-    Topology(MtId),
-    NodeTag(u32),
-    TraceOption(InstanceTraceOption),
-    Interface(InterfaceIndex),
-    InterfaceAddressFamily(InterfaceIndex, AddressFamily),
-    InterfaceTopology(InterfaceIndex, MtId),
-    InterfaceAsla(InterfaceIndex, StandardApp),
-    InterfaceTraceOption(InterfaceIndex, InterfaceTraceOption),
-    SpbService(SpbServiceKey),
-    SpbIsid(SpbServiceKey, u32),
-}
 
 #[derive(Debug)]
 pub enum Resource {}
@@ -89,9 +73,6 @@ pub enum Event {
     RedistributeDelete(AddressFamily, LevelNumber, Protocol),
     UpdateTraceOptions,
 }
-
-pub static VALIDATION_CALLBACKS: Lazy<ValidationCallbacks> = Lazy::new(load_validation_callbacks);
-pub static CALLBACKS: Lazy<Callbacks<Instance>> = Lazy::new(load_callbacks);
 
 // ===== configuration structs =====
 
@@ -358,2187 +339,1133 @@ pub struct TraceOptionPacketType {
     pub rx: bool,
 }
 
-// ===== callbacks =====
+// ===== helper functions =====
 
-fn load_callbacks() -> Callbacks<Instance> {
-    CallbacksBuilder::<Instance>::default()
-        .path(isis::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let enabled = args.dnode.get_bool();
+fn apply_instance(instance: &mut Instance, change: ConfigChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        ConfigChange::Enabled(enabled) => {
             instance.config.enabled = enabled;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::InstanceUpdate);
-        })
-        .path(isis::level_type::PATH)
-        .modify_apply(|instance, args| {
-            let level_type = args.dnode.get_string();
-            let level_type = LevelType::try_from_yang(&level_type).unwrap();
+        }
+        ConfigChange::LevelType(level_type) => {
             instance.config.level_type = level_type;
-
-            let event_queue = args.event_queue;
             // TODO: We can do better than a full reset.
             event_queue.insert(Event::InstanceReset);
             event_queue.insert(Event::InstanceLevelTypeUpdate);
-        })
-        .path(isis::system_id::PATH)
-        .modify_apply(|instance, args| {
-            let system_id = args.dnode.get_string();
-            let system_id = SystemId::try_from_yang(&system_id).unwrap();
-            instance.config.system_id = Some(system_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceReset);
+        }
+        ConfigChange::SystemId(system_id) => {
+            if system_id.is_some() {
+                event_queue.insert(Event::InstanceReset);
+            }
+            instance.config.system_id = system_id;
             event_queue.insert(Event::InstanceUpdate);
-        })
-        .delete_apply(|instance, args| {
-            instance.config.system_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdate);
-        })
-        .path(isis::area_address::PATH)
-        .create_apply(|instance, args| {
-            let area_addr = args.dnode.get_string();
-            let area_addr = AreaAddr::try_from_yang(&area_addr).unwrap();
-            instance.config.area_addrs.insert(area_addr);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let area_addr = args.dnode.get_string();
-            let area_addr = AreaAddr::try_from_yang(&area_addr).unwrap();
-            instance.config.area_addrs.remove(&area_addr);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::lsp_mtu::PATH)
-        .modify_apply(|instance, args| {
-            let lsp_mtu = args.dnode.get_u16();
+        }
+        ConfigChange::AreaAddress(op, area_addr) => {
+            match op {
+                ConfigOp::Create => {
+                    instance.config.area_addrs.insert(area_addr);
+                }
+                ConfigOp::Delete => {
+                    instance.config.area_addrs.remove(&area_addr);
+                }
+            }
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::LspMtu(lsp_mtu) => {
             instance.config.lsp_mtu = lsp_mtu;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::lsp_lifetime::PATH)
-        .modify_apply(|instance, args| {
-            let lsp_lifetime = args.dnode.get_u16();
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::LspLifetime(lsp_lifetime) => {
             instance.config.lsp_lifetime = lsp_lifetime;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::RefreshLsps);
-        })
-        .path(isis::lsp_refresh::PATH)
-        .modify_apply(|instance, args| {
-            let lsp_refresh = args.dnode.get_u16();
+        }
+        ConfigChange::LspRefresh(lsp_refresh) => {
             instance.config.lsp_refresh = lsp_refresh;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::RefreshLsps);
-        })
-        .path(isis::poi_tlv::PATH)
-        .modify_apply(|instance, args| {
-            let enabled = args.dnode.get_bool();
+        }
+        ConfigChange::PoiTlv(enabled) => {
             instance.config.purge_originator = enabled;
-        })
-        .path(isis::node_tags::node_tag::PATH)
-        .create_apply(|instance, args| {
-            let node_tag = args.dnode.get_u32_relative("tag").unwrap();
-            instance.config.node_tags.insert(node_tag);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let node_tag = args.list_entry.into_node_tag().unwrap();
-            instance.config.node_tags.remove(&node_tag);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let node_tag = dnode.get_u32_relative("tag").unwrap();
-            ListEntry::NodeTag(node_tag)
-        })
-        .path(isis::metric_type::value::PATH)
-        .modify_apply(|instance, args| {
-            let metric_type = args.dnode.get_string();
-            let metric_type = MetricType::try_from_yang(&metric_type).unwrap();
+        }
+        ConfigChange::NodeTag(keys, change) => {
+            apply_node_tag(instance, keys.tag, change, event_queue)?;
+        }
+        ConfigChange::MetricTypeValue(metric_type) => {
             instance.config.metric_type.all = metric_type;
-
-            let event_queue = args.event_queue;
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::MetricTypeLevel1Value(metric_type) => {
+            instance.config.metric_type.l1 = metric_type;
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
+        }
+        ConfigChange::MetricTypeLevel2Value(metric_type) => {
+            instance.config.metric_type.l2 = metric_type;
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::metric_type::level_1::value::PATH)
-        .modify_apply(|instance, args| {
-            let metric_type = args.dnode.get_string();
-            let metric_type = MetricType::try_from_yang(&metric_type).unwrap();
-            instance.config.metric_type.l1 = Some(metric_type);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.metric_type.l1 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .path(isis::metric_type::level_2::value::PATH)
-        .modify_apply(|instance, args| {
-            let metric_type = args.dnode.get_string();
-            let metric_type = MetricType::try_from_yang(&metric_type).unwrap();
-            instance.config.metric_type.l2 = Some(metric_type);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.metric_type.l2 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::default_metric::value::PATH)
-        .modify_apply(|instance, args| {
-            let metric = args.dnode.get_u32();
+        }
+        ConfigChange::DefaultMetricValue(metric) => {
             instance.config.default_metric.all = metric;
-        })
-        .path(isis::default_metric::level_1::value::PATH)
-        .modify_apply(|instance, args| {
-            let metric = args.dnode.get_u32();
-            instance.config.default_metric.l1 = Some(metric);
-        })
-        .delete_apply(|instance, _args| {
-            instance.config.default_metric.l1 = None;
-        })
-        .path(isis::default_metric::level_2::value::PATH)
-        .modify_apply(|instance, args| {
-            let metric = args.dnode.get_u32();
-            instance.config.default_metric.l2 = Some(metric);
-        })
-        .delete_apply(|instance, _args| {
-            instance.config.default_metric.l2 = None;
-        })
-        .path(isis::authentication::key_chain::PATH)
-        .modify_apply(|instance, args| {
-            let keychain = args.dnode.get_string();
-            instance.config.auth.all.keychain = Some(keychain);
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::DefaultMetricLevel1Value(metric) => {
+            instance.config.default_metric.l1 = metric;
+        }
+        ConfigChange::DefaultMetricLevel2Value(metric) => {
+            instance.config.default_metric.l2 = metric;
+        }
+        ConfigChange::AuthenticationKeyChain(keychain) => {
+            instance.config.auth.all.keychain = keychain;
+            event_queue.insert(Event::InstanceUpdateAuth);
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::AuthenticationKey(key) => {
+            instance.config.auth.all.key = key;
+            event_queue.insert(Event::InstanceUpdateAuth);
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::AuthenticationKeyId(key_id) => {
+            instance.config.auth.all.key_id = key_id;
+            event_queue.insert(Event::InstanceUpdateAuth);
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::AuthenticationCryptoAlgorithm(algo) => {
+            instance.config.auth.all.algo = algo;
+            event_queue.insert(Event::InstanceUpdateAuth);
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::AuthenticationLevel1KeyChain(keychain) => {
+            instance.config.auth.l1.keychain = keychain;
             event_queue.insert(Event::InstanceUpdateAuth);
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.all.keychain = None;
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::AuthenticationLevel1Key(key) => {
+            instance.config.auth.l1.key = key;
             event_queue.insert(Event::InstanceUpdateAuth);
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::authentication::key::PATH)
-        .modify_apply(|instance, args| {
-            let key = args.dnode.get_string();
-            instance.config.auth.all.key = Some(key);
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::AuthenticationLevel1KeyId(key_id) => {
+            instance.config.auth.l1.key_id = key_id;
             event_queue.insert(Event::InstanceUpdateAuth);
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.all.key = None;
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::AuthenticationLevel1CryptoAlgorithm(algo) => {
+            instance.config.auth.l1.algo = algo;
             event_queue.insert(Event::InstanceUpdateAuth);
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::authentication::key_id::PATH)
-        .modify_apply(|instance, args| {
-            let key_id = args.dnode.get_u16();
-            instance.config.auth.all.key_id = Some(key_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.all.key_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::authentication::crypto_algorithm::PATH)
-        .modify_apply(|instance, args| {
-            let algo = args.dnode.get_string();
-            let algo = CryptoAlgo::try_from_yang(&algo).unwrap();
-            instance.config.auth.all.algo = Some(algo);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.all.algo = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::authentication::level_1::key_chain::PATH)
-        .modify_apply(|instance, args| {
-            let keychain = args.dnode.get_string();
-            instance.config.auth.l1.keychain = Some(keychain);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.l1.keychain = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .path(isis::authentication::level_1::key::PATH)
-        .modify_apply(|instance, args| {
-            let key = args.dnode.get_string();
-            instance.config.auth.l1.key = Some(key);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.l1.key = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .path(isis::authentication::level_1::key_id::PATH)
-        .modify_apply(|instance, args| {
-            let key_id = args.dnode.get_u16();
-            instance.config.auth.l1.key_id = Some(key_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.l1.key_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .path(isis::authentication::level_1::crypto_algorithm::PATH)
-        .modify_apply(|instance, args| {
-            let algo = args.dnode.get_string();
-            let algo = CryptoAlgo::try_from_yang(&algo).unwrap();
-            instance.config.auth.l1.algo = Some(algo);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.l1.algo = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .path(isis::authentication::level_2::key_chain::PATH)
-        .modify_apply(|instance, args| {
-            let keychain = args.dnode.get_string();
-            instance.config.auth.l2.keychain = Some(keychain);
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::AuthenticationLevel2KeyChain(keychain) => {
+            instance.config.auth.l2.keychain = keychain;
             event_queue.insert(Event::InstanceUpdateAuth);
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.l2.keychain = None;
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::AuthenticationLevel2Key(key) => {
+            instance.config.auth.l2.key = key;
             event_queue.insert(Event::InstanceUpdateAuth);
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::authentication::level_2::key::PATH)
-        .modify_apply(|instance, args| {
-            let key = args.dnode.get_string();
-            instance.config.auth.l2.key = Some(key);
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::AuthenticationLevel2KeyId(key_id) => {
+            instance.config.auth.l2.key_id = key_id;
             event_queue.insert(Event::InstanceUpdateAuth);
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.l2.key = None;
-
-            let event_queue = args.event_queue;
+        }
+        ConfigChange::AuthenticationLevel2CryptoAlgorithm(algo) => {
+            instance.config.auth.l2.algo = algo;
             event_queue.insert(Event::InstanceUpdateAuth);
             event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::authentication::level_2::key_id::PATH)
-        .modify_apply(|instance, args| {
-            let key_id = args.dnode.get_u16();
-            instance.config.auth.l2.key_id = Some(key_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.l2.key_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::authentication::level_2::crypto_algorithm::PATH)
-        .modify_apply(|instance, args| {
-            let algo = args.dnode.get_string();
-            let algo = CryptoAlgo::try_from_yang(&algo).unwrap();
-            instance.config.auth.l2.algo = Some(algo);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.auth.l2.algo = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceUpdateAuth);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::address_families::address_family_list::PATH)
-        .create_apply(|instance, args| {
-            let af = args.dnode.get_string_relative("address-family").unwrap();
-            let af = AddressFamily::try_from_yang(&af).unwrap();
-            instance.config.afs.insert(af, AddressFamilyCfg::default());
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let af = args.list_entry.into_address_family().unwrap();
-            instance.config.afs.remove(&af);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let af = dnode.get_string_relative("address-family").unwrap();
-            let af = AddressFamily::try_from_yang(&af).unwrap();
-            ListEntry::AddressFamily(af)
-        })
-        .path(isis::address_families::address_family_list::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let af = args.list_entry.into_address_family().unwrap();
-            let af_cfg = instance.config.afs.get_mut(&af).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            af_cfg.enabled = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::address_families::address_family_list::redistribution::PATH)
-        .create_apply(|instance, args| {
-            let af = args.list_entry.into_address_family().unwrap();
-            let af_cfg = instance.config.afs.get_mut(&af).unwrap();
-
-            let level = args.dnode.get_string_relative("./level").unwrap();
-            let level = LevelNumber::try_from_yang(&level).unwrap();
-            let protocol = args.dnode.get_string_relative("./type").unwrap();
-            let protocol = Protocol::try_from_yang(&protocol).unwrap();
-            af_cfg.redistribution.insert((level, protocol), Default::default());
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RedistributeAdd(af, protocol));
-        })
-        .delete_apply(|instance, args| {
-            let (af, level, protocol) = args.list_entry.into_redistribution().unwrap();
-            let af_cfg = instance.config.afs.get_mut(&af).unwrap();
-
-            af_cfg.redistribution.remove(&(level, protocol));
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RedistributeDelete(af, level, protocol));
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let af = list_entry.into_address_family().unwrap();
-            let level = dnode.get_string_relative("./level").unwrap();
-            let level = LevelNumber::try_from_yang(&level).unwrap();
-            let protocol = dnode.get_string_relative("./type").unwrap();
-            let protocol = Protocol::try_from_yang(&protocol).unwrap();
-            ListEntry::Redistribution(af, level, protocol)
-        })
-        .path(isis::mpls::te_rid::ipv4_router_id::PATH)
-        .modify_apply(|instance, args| {
-            let addr = args.dnode.get_ipv4();
-            instance.config.ipv4_router_id = Some(addr);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.ipv4_router_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::mpls::te_rid::ipv6_router_id::PATH)
-        .modify_apply(|instance, args| {
-            let addr = args.dnode.get_ipv6();
-            instance.config.ipv6_router_id = Some(addr);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            instance.config.ipv6_router_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::spf_control::paths::PATH)
-        .modify_apply(|instance, args| {
-            let max_paths = args.dnode.get_u16();
+        }
+        ConfigChange::AddressFamilyList(keys, change) => {
+            apply_address_family(instance, keys.address_family, change, event_queue)?;
+        }
+        ConfigChange::MplsTeRidIpv4RouterId(addr) => {
+            instance.config.ipv4_router_id = addr;
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::MplsTeRidIpv6RouterId(addr) => {
+            instance.config.ipv6_router_id = addr;
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::SpfControlPaths(max_paths) => {
             instance.config.max_paths = max_paths;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::RerunSpf);
-        })
-        .path(isis::spf_control::ietf_spf_delay::initial_delay::PATH)
-        .modify_apply(|instance, args| {
-            let initial_delay = args.dnode.get_u32();
+        }
+        ConfigChange::SpfControlIetfSpfDelayInitialDelay(initial_delay) => {
             instance.config.spf_initial_delay = initial_delay;
-        })
-        .path(isis::spf_control::ietf_spf_delay::short_delay::PATH)
-        .modify_apply(|instance, args| {
-            let short_delay = args.dnode.get_u32();
+        }
+        ConfigChange::SpfControlIetfSpfDelayShortDelay(short_delay) => {
             instance.config.spf_short_delay = short_delay;
-        })
-        .path(isis::spf_control::ietf_spf_delay::long_delay::PATH)
-        .modify_apply(|instance, args| {
-            let long_delay = args.dnode.get_u32();
+        }
+        ConfigChange::SpfControlIetfSpfDelayLongDelay(long_delay) => {
             instance.config.spf_long_delay = long_delay;
-        })
-        .path(isis::spf_control::ietf_spf_delay::hold_down::PATH)
-        .modify_apply(|instance, args| {
-            let hold_down = args.dnode.get_u32();
+        }
+        ConfigChange::SpfControlIetfSpfDelayHoldDown(hold_down) => {
             instance.config.spf_hold_down = hold_down;
-        })
-        .path(isis::spf_control::ietf_spf_delay::time_to_learn::PATH)
-        .modify_apply(|instance, args| {
-            let time_to_learn = args.dnode.get_u32();
+        }
+        ConfigChange::SpfControlIetfSpfDelayTimeToLearn(time_to_learn) => {
             instance.config.spf_time_to_learn = time_to_learn;
-        })
-        .path(isis::preference::internal::PATH)
-        .modify_apply(|instance, args| {
-            let preference = args.dnode.get_u8();
-            instance.config.preference.internal = preference;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReinstallRoutes);
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::preference::external::PATH)
-        .modify_apply(|instance, args| {
-            let preference = args.dnode.get_u8();
-            instance.config.preference.external = preference;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReinstallRoutes);
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::preference::default::PATH)
-        .modify_apply(|instance, args| {
-            let preference = args.dnode.get_u8();
-            instance.config.preference.internal = preference;
-            instance.config.preference.external = preference;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReinstallRoutes);
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::overload::status::PATH)
-        .modify_apply(|instance, args| {
-            let overload_status = args.dnode.get_bool();
+        }
+        ConfigChange::PreferenceInternal(preference) => {
+            if let Some(preference) = preference {
+                instance.config.preference.internal = preference;
+                event_queue.insert(Event::ReinstallRoutes);
+            }
+        }
+        ConfigChange::PreferenceExternal(preference) => {
+            if let Some(preference) = preference {
+                instance.config.preference.external = preference;
+                event_queue.insert(Event::ReinstallRoutes);
+            }
+        }
+        ConfigChange::PreferenceDefault(preference) => {
+            if let Some(preference) = preference {
+                instance.config.preference.internal = preference;
+                instance.config.preference.external = preference;
+                event_queue.insert(Event::ReinstallRoutes);
+            }
+        }
+        ConfigChange::OverloadStatus(overload_status) => {
             instance.config.overload_status = overload_status;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::OverloadChange(overload_status));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::topologies::topology::PATH)
-        .create_apply(|instance, args| {
-            let name = args.dnode.get_string_relative("name").unwrap();
-            let mt_id = MtId::try_from_yang(&name).unwrap();
-            instance.config.mt.insert(mt_id, InstanceMtCfg::default());
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceTopologyUpdate);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let mt_id = args.list_entry.into_topology().unwrap();
-            instance.config.mt.remove(&mt_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceTopologyUpdate);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .lookup(|_context, _list_entry, dnode| {
-            let name = dnode.get_string_relative("name").unwrap();
-            let mt_id = MtId::try_from_yang(&name).unwrap();
-            ListEntry::Topology(mt_id)
-        })
-        .path(isis::topologies::topology::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let mt_id = args.list_entry.into_topology().unwrap();
-            let mt_cfg = instance.config.mt.get_mut(&mt_id).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            mt_cfg.enabled = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InstanceTopologyUpdate);
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::topologies::topology::default_metric::value::PATH)
-        .modify_apply(|instance, args| {
-            let mt_id = args.list_entry.into_topology().unwrap();
-            let mt_cfg = instance.config.mt.get_mut(&mt_id).unwrap();
-
-            let metric = args.dnode.get_u32();
-            mt_cfg.default_metric.all = metric;
-        })
-        .path(isis::topologies::topology::default_metric::level_1::value::PATH)
-        .modify_apply(|instance, args| {
-            let mt_id = args.list_entry.into_topology().unwrap();
-            let mt_cfg = instance.config.mt.get_mut(&mt_id).unwrap();
-
-            let metric = args.dnode.get_u32();
-            mt_cfg.default_metric.l1 = Some(metric);
-        })
-        .delete_apply(|instance, args| {
-            let mt_id = args.list_entry.into_topology().unwrap();
-            let mt_cfg = instance.config.mt.get_mut(&mt_id).unwrap();
-
-            mt_cfg.default_metric.l1 = None;
-        })
-        .path(isis::topologies::topology::default_metric::level_2::value::PATH)
-        .modify_apply(|instance, args| {
-            let mt_id = args.list_entry.into_topology().unwrap();
-            let mt_cfg = instance.config.mt.get_mut(&mt_id).unwrap();
-
-            let metric = args.dnode.get_u32();
-            mt_cfg.default_metric.l2 = Some(metric);
-        })
-        .delete_apply(|instance, args| {
-            let mt_id = args.list_entry.into_topology().unwrap();
-            let mt_cfg = instance.config.mt.get_mut(&mt_id).unwrap();
-
-            mt_cfg.default_metric.l2 = None;
-        })
-        .path(isis::isis_link_attr::legacy::PATH)
-        .create_apply(|instance, args| {
-            instance.config.link_attr_mode = LinkAttrMode::Legacy;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::isis_link_attr::transition::PATH)
-        .create_apply(|instance, args| {
-            instance.config.link_attr_mode = LinkAttrMode::Transition;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::isis_link_attr::app_specific::PATH)
-        .create_apply(|instance, args| {
-            instance.config.link_attr_mode = LinkAttrMode::AppSpecific;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::attached_bit::suppress_advertisement::PATH)
-        .modify_apply(|instance, args| {
-            let enabled = args.dnode.get_bool();
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::Topology(keys, change) => {
+            apply_topology(instance, keys.name, change, event_queue)?;
+        }
+        ConfigChange::Interface(keys, change) => {
+            apply_interface(instance, &keys.name, change, event_queue)?;
+        }
+        ConfigChange::BierMtId(mt_id) => {
+            instance.config.bier.mt_id = mt_id.unwrap_or(0);
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::BierBierEnable(enable) => {
+            instance.config.bier.enabled = enable;
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::BierBierAdvertise(advertise) => {
+            instance.config.bier.advertise = advertise;
+        }
+        ConfigChange::BierBierReceive(receive) => {
+            instance.config.bier.receive = receive;
+        }
+        ConfigChange::AttachedBitSuppressAdvertisement(enabled) => {
             instance.config.att_suppress = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::attached_bit::ignore_reception::PATH)
-        .modify_apply(|instance, args| {
-            let enabled = args.dnode.get_bool();
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        ConfigChange::AttachedBitIgnoreReception(enabled) => {
             instance.config.att_ignore = enabled;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::RerunSpf);
-        })
-        .path(isis::inter_level_propagation_policies::level1_to_level2::summary_prefixes::PATH)
-        .create_apply(|instance, args| {
-            let prefix = args.dnode.get_prefix_relative("prefix").unwrap();
-            instance.config.summaries.insert(prefix, SummaryCfg::default());
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RerunSpf);
-        })
-        .delete_apply(|instance, args| {
-            let prefix = args.list_entry.into_summary().unwrap();
-            instance.config.summaries.remove(&prefix);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RerunSpf);
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let prefix = dnode.get_prefix_relative("prefix").unwrap();
-            ListEntry::Summary(prefix)
-        })
-        .path(isis::inter_level_propagation_policies::level1_to_level2::summary_prefixes::metric::PATH)
-        .modify_apply(|instance, args| {
-            let prefix = args.list_entry.into_summary().unwrap();
-            let summary_cfg = instance.config.summaries.get_mut(&prefix).unwrap();
-
-            let metric = args.dnode.get_u32();
-            summary_cfg.metric = Some(metric);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RerunSpf);
-        })
-        .delete_apply(|instance, args| {
-            let prefix = args.list_entry.into_summary().unwrap();
-            let summary_cfg = instance.config.summaries.get_mut(&prefix).unwrap();
-
-            summary_cfg.metric = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::RerunSpf);
-        })
-        .path(isis::flooding_reduction::algorithm::PATH)
-        .modify_apply(|instance, args| {
-            let algo = args.dnode.get_string();
-            let algo = FloodingAlgo::try_from_yang(&algo).unwrap();
+        }
+        ConfigChange::InterLevelPropagationPoliciesLevel1ToLevel2SummaryPrefixes(keys, change) => {
+            apply_summary_prefix(instance, keys.prefix, change, event_queue)?;
+        }
+        ConfigChange::FloodingReductionAlgorithm(algo) => {
             instance.config.flooding_reduction.algo = algo;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::RerunSpf);
-        })
-        .path(isis::trace_options::flag::PATH)
-        .create_apply(|instance, args| {
-            let trace_opt = args.dnode.get_string_relative("name").unwrap();
-            let trace_opt = InstanceTraceOption::try_from_yang(&trace_opt).unwrap();
-            let trace_opts = &mut instance.config.trace_opts;
-            match trace_opt {
-                InstanceTraceOption::FloodReduction => trace_opts.flood_reduction = true,
-                InstanceTraceOption::InternalBus => trace_opts.ibus = true,
-                InstanceTraceOption::PacketsAll => {
-                    trace_opts.packets.all.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsHello => {
-                    trace_opts.packets.hello.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsPsnp => {
-                    trace_opts.packets.psnp.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsCsnp => {
-                    trace_opts.packets.csnp.get_or_insert_default();
-                }
-                InstanceTraceOption::PacketsLsp => {
-                    trace_opts.packets.lsp.get_or_insert_default();
-                }
-                InstanceTraceOption::Lsdb => trace_opts.lsdb = true,
-                InstanceTraceOption::Spf => trace_opts.spf = true,
-            }
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .delete_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let trace_opts = &mut instance.config.trace_opts;
-            match trace_opt {
-                InstanceTraceOption::FloodReduction => trace_opts.flood_reduction = false,
-                InstanceTraceOption::InternalBus => trace_opts.ibus = false,
-                InstanceTraceOption::PacketsAll => trace_opts.packets.all = None,
-                InstanceTraceOption::PacketsHello => trace_opts.packets.hello = None,
-                InstanceTraceOption::PacketsPsnp => trace_opts.packets.psnp = None,
-                InstanceTraceOption::PacketsCsnp => trace_opts.packets.csnp = None,
-                InstanceTraceOption::PacketsLsp => trace_opts.packets.lsp = None,
-                InstanceTraceOption::Lsdb => trace_opts.lsdb = false,
-                InstanceTraceOption::Spf => trace_opts.spf = false,
-            }
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let trace_opt = dnode.get_string_relative("name").unwrap();
-            let trace_opt = InstanceTraceOption::try_from_yang(&trace_opt).unwrap();
-            ListEntry::TraceOption(trace_opt)
-        })
-        .path(isis::trace_options::flag::send::PATH)
-        .modify_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut instance.config.trace_opts;
-            let Some(trace_opt_packet) = (match trace_opt {
-                InstanceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
-                InstanceTraceOption::PacketsHello => trace_opts.packets.hello.as_mut(),
-                InstanceTraceOption::PacketsPsnp => trace_opts.packets.psnp.as_mut(),
-                InstanceTraceOption::PacketsCsnp => trace_opts.packets.csnp.as_mut(),
-                InstanceTraceOption::PacketsLsp => trace_opts.packets.lsp.as_mut(),
-                _ => None,
-            }) else {
-                return;
+        }
+        ConfigChange::TraceOptionsFlag(keys, change) => {
+            apply_trace_options(instance, keys.name, change, event_queue)?;
+        }
+        ConfigChange::SpbEnable(enable) => {
+            instance.config.spb.enabled = enable;
+        }
+        ConfigChange::SpbService(keys, change) => {
+            let Ok(bmac) = keys.bmac.parse::<MacAddr>() else {
+                return Ok(());
             };
-            trace_opt_packet.tx = enable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .path(isis::trace_options::flag::receive::PATH)
-        .modify_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut instance.config.trace_opts;
-            let Some(trace_opt_packet) = (match trace_opt {
-                InstanceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
-                InstanceTraceOption::PacketsHello => trace_opts.packets.hello.as_mut(),
-                InstanceTraceOption::PacketsPsnp => trace_opts.packets.psnp.as_mut(),
-                InstanceTraceOption::PacketsCsnp => trace_opts.packets.csnp.as_mut(),
-                InstanceTraceOption::PacketsLsp => trace_opts.packets.lsp.as_mut(),
-                _ => None,
-            }) else {
-                return;
+            let key = SpbServiceKey {
+                bmac,
+                base_vid: keys.base_vid,
             };
-            trace_opt_packet.rx = enable;
+            apply_spb_service(instance, key, change)?;
+        }
+        ConfigChange::IsisLinkAttrLegacy(op) => {
+            if op == ConfigOp::Create {
+                instance.config.link_attr_mode = LinkAttrMode::Legacy;
+                for level in LevelType::All {
+                    event_queue.insert(Event::ReoriginateLsps(level));
+                }
+            }
+        }
+        ConfigChange::IsisLinkAttrTransition(op) => {
+            if op == ConfigOp::Create {
+                instance.config.link_attr_mode = LinkAttrMode::Transition;
+                for level in LevelType::All {
+                    event_queue.insert(Event::ReoriginateLsps(level));
+                }
+            }
+        }
+        ConfigChange::IsisLinkAttrAppSpecific(op) => {
+            if op == ConfigOp::Create {
+                instance.config.link_attr_mode = LinkAttrMode::AppSpecific;
+                for level in LevelType::All {
+                    event_queue.insert(Event::ReoriginateLsps(level));
+                }
+            }
+        }
+        ConfigChange::SegmentRoutingEnabled(enabled) => {
+            instance.config.sr.enabled = enabled;
+            event_queue.insert(Event::SrEnabledChange(enabled));
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+    }
 
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::UpdateTraceOptions);
-        })
-        .path(isis::interfaces::interface::PATH)
-        .create_apply(|instance, args| {
-            let ifname = args.dnode.get_string_relative("name").unwrap();
+    Ok(())
+}
 
-            let iface = instance.arenas.interfaces.insert(&ifname);
+fn apply_node_tag(instance: &mut Instance, tag: u32, change: NodeTagChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        NodeTagChange::Create => {
+            instance.config.node_tags.insert(tag);
+        }
+        NodeTagChange::Delete => {
+            instance.config.node_tags.remove(&tag);
+        }
+    }
+    for level in LevelType::All {
+        event_queue.insert(Event::ReoriginateLsps(level));
+    }
+
+    Ok(())
+}
+
+fn apply_address_family(instance: &mut Instance, af: AddressFamily, change: AddressFamilyListChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        AddressFamilyListChange::Create => {
+            instance.config.afs.insert(af, AddressFamilyCfg::default());
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        AddressFamilyListChange::Delete => {
+            instance.config.afs.remove(&af);
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        AddressFamilyListChange::Entry(change) => {
+            let af_cfg = instance.config.afs.get_mut(&af).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                AddressFamilyListEntryChange::Enabled(enabled) => {
+                    af_cfg.enabled = enabled;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::ReoriginateLsps(level));
+                    }
+                }
+                AddressFamilyListEntryChange::Redistribution(keys, change) => {
+                    apply_redistribution(af_cfg, af, keys.level, keys.r#type, change, event_queue)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_redistribution(af_cfg: &mut AddressFamilyCfg, af: AddressFamily, level: LevelNumber, protocol: Protocol, change: AddressFamilyListRedistributionChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        AddressFamilyListRedistributionChange::Create => {
+            af_cfg.redistribution.insert((level, protocol), Default::default());
+            event_queue.insert(Event::RedistributeAdd(af, protocol));
+        }
+        AddressFamilyListRedistributionChange::Delete => {
+            af_cfg.redistribution.remove(&(level, protocol));
+            event_queue.insert(Event::RedistributeDelete(af, level, protocol));
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_topology(instance: &mut Instance, mt_id: MtId, change: TopologyChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        TopologyChange::Create => {
+            instance.config.mt.insert(mt_id, InstanceMtCfg::default());
+            event_queue.insert(Event::InstanceTopologyUpdate);
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        TopologyChange::Delete => {
+            instance.config.mt.remove(&mt_id);
+            event_queue.insert(Event::InstanceTopologyUpdate);
+            for level in LevelType::All {
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        TopologyChange::Entry(change) => {
+            let mt_cfg = instance.config.mt.get_mut(&mt_id).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                TopologyEntryChange::Enabled(enabled) => {
+                    mt_cfg.enabled = enabled;
+                    event_queue.insert(Event::InstanceTopologyUpdate);
+                    for level in LevelType::All {
+                        event_queue.insert(Event::ReoriginateLsps(level));
+                    }
+                }
+                TopologyEntryChange::DefaultMetricValue(metric) => {
+                    mt_cfg.default_metric.all = metric;
+                }
+                TopologyEntryChange::DefaultMetricLevel1Value(metric) => {
+                    mt_cfg.default_metric.l1 = metric;
+                }
+                TopologyEntryChange::DefaultMetricLevel2Value(metric) => {
+                    mt_cfg.default_metric.l2 = metric;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_interface(instance: &mut Instance, ifname: &str, change: InterfaceChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        InterfaceChange::Create => {
+            let iface = instance.arenas.interfaces.insert(ifname);
             iface.config.level_type.resolved = iface.config.resolved_level_type(&instance.config);
 
-            let event_queue = args.event_queue;
             event_queue.insert(Event::InterfaceUpdate(iface.index));
             event_queue.insert(Event::InterfaceUpdateTraceOptions(iface.index));
             event_queue.insert(Event::InterfaceIbusSub(iface.index));
-        })
-        .delete_apply(|_instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceDelete(iface_idx));
-        })
-        .lookup(|instance, _list_entry, dnode| {
-            let ifname = dnode.get_string_relative("./name").unwrap();
-            instance.arenas.interfaces.get_by_name(&ifname).map(|iface| ListEntry::Interface(iface.index)).expect("could not find IS-IS interface")
-        })
-        .path(isis::interfaces::interface::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let enabled = args.dnode.get_bool();
-            iface.config.enabled = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdate(iface_idx));
-        })
-        .path(isis::interfaces::interface::level_type::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let level_type = args.dnode.get_string();
-            let level_type = LevelType::try_from_yang(&level_type).unwrap();
-            iface.config.level_type.explicit = Some(level_type);
-            iface.config.level_type.resolved = iface.config.resolved_level_type(&instance.config);
-
-            let event_queue = args.event_queue;
-            // TODO: We can do better than a full reset.
-            event_queue.insert(Event::InterfaceReset(iface_idx));
-        })
-        .path(isis::interfaces::interface::lsp_pacing_interval::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let lsp_pacing_interval = args.dnode.get_u32();
-            iface.config.lsp_pacing_interval = lsp_pacing_interval;
-        })
-        .path(isis::interfaces::interface::lsp_retransmit_interval::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let lsp_rxmt_interval = args.dnode.get_u16();
-            iface.config.lsp_rxmt_interval = lsp_rxmt_interval;
-        })
-        .path(isis::interfaces::interface::passive::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let passive = args.dnode.get_bool();
-            iface.config.passive = passive;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceReset(iface_idx));
-        })
-        .path(isis::interfaces::interface::csnp_interval::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let csnp_interval = args.dnode.get_u16();
-            iface.config.csnp_interval = csnp_interval;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateCsnpInterval(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_padding::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let hello_padding = args.dnode.get_bool();
-            iface.config.hello_padding = hello_padding;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceRestartNetwork(iface_idx));
-        })
-        .path(isis::interfaces::interface::interface_type::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let interface_type = args.dnode.get_string();
-            let interface_type = InterfaceType::try_from_yang(&interface_type).unwrap();
-            iface.config.interface_type = interface_type;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceReset(iface_idx));
-        })
-        .path(isis::interfaces::interface::node_flag::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let enabled = args.dnode.get_bool();
-            iface.config.node_flag = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::hello_authentication::key_chain::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let keychain = args.dnode.get_string();
-            iface.config.hello_auth.all.keychain = Some(keychain);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.all.keychain = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::key::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let key = args.dnode.get_string();
-            iface.config.hello_auth.all.key = Some(key);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.all.key = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::key_id::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let key_id = args.dnode.get_u16();
-            iface.config.hello_auth.all.key_id = Some(key_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.all.key_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::crypto_algorithm::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let algo = args.dnode.get_string();
-            let algo = CryptoAlgo::try_from_yang(&algo).unwrap();
-            iface.config.hello_auth.all.algo = Some(algo);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.all.algo = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::level_1::key_chain::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let keychain = args.dnode.get_string();
-            iface.config.hello_auth.l1.keychain = Some(keychain);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.l1.keychain = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::level_1::key::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let key = args.dnode.get_string();
-            iface.config.hello_auth.l1.key = Some(key);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.l1.key = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::level_1::key_id::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let key_id = args.dnode.get_u16();
-            iface.config.hello_auth.l1.key_id = Some(key_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.l1.key_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::level_1::crypto_algorithm::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let algo = args.dnode.get_string();
-            let algo = CryptoAlgo::try_from_yang(&algo).unwrap();
-            iface.config.hello_auth.l1.algo = Some(algo);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.l1.algo = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::level_2::key_chain::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let keychain = args.dnode.get_string();
-            iface.config.hello_auth.l2.keychain = Some(keychain);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.l2.keychain = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::level_2::key::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let key = args.dnode.get_string();
-            iface.config.hello_auth.l2.key = Some(key);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.l2.key = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::level_2::key_id::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let key_id = args.dnode.get_u16();
-            iface.config.hello_auth.l2.key_id = Some(key_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.l2.key_id = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_authentication::level_2::crypto_algorithm::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let algo = args.dnode.get_string();
-            let algo = CryptoAlgo::try_from_yang(&algo).unwrap();
-            iface.config.hello_auth.l2.algo = Some(algo);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_auth.l2.algo = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
-        })
-        .path(isis::interfaces::interface::hello_interval::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let hello_interval = args.dnode.get_u16();
-            iface.config.hello_interval.all = hello_interval;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::hello_interval::level_1::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let hello_interval = args.dnode.get_u16();
-            iface.config.hello_interval.l1 = Some(hello_interval);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_interval.l1 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-        })
-        .path(isis::interfaces::interface::hello_interval::level_2::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let hello_interval = args.dnode.get_u16();
-            iface.config.hello_interval.l2 = Some(hello_interval);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_interval.l2 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::hello_multiplier::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let hello_multiplier = args.dnode.get_u16();
-            iface.config.hello_multiplier.all = hello_multiplier;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::hello_multiplier::level_1::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let hello_multiplier = args.dnode.get_u16();
-            iface.config.hello_multiplier.l1 = Some(hello_multiplier);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_multiplier.l1 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-        })
-        .path(isis::interfaces::interface::hello_multiplier::level_2::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let hello_multiplier = args.dnode.get_u16();
-            iface.config.hello_multiplier.l2 = Some(hello_multiplier);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.hello_multiplier.l2 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::priority::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let priority = args.dnode.get_u8();
-            iface.config.priority.all = priority;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfacePriorityChange(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfacePriorityChange(iface_idx, LevelNumber::L2));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::priority::level_1::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let priority = args.dnode.get_u8();
-            iface.config.priority.l1 = Some(priority);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfacePriorityChange(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.priority.l1 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfacePriorityChange(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-        })
-        .path(isis::interfaces::interface::priority::level_2::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let priority = args.dnode.get_u8();
-            iface.config.priority.l2 = Some(priority);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfacePriorityChange(iface_idx, LevelNumber::L2));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.priority.l2 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfacePriorityChange(iface_idx, LevelNumber::L2));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::metric::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let metric = args.dnode.get_u32();
-            iface.config.metric.all = metric;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::metric::level_1::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let metric = args.dnode.get_u32();
-            iface.config.metric.l1 = Some(metric);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.metric.l1 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-        })
-        .path(isis::interfaces::interface::metric::level_2::value::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let metric = args.dnode.get_u32();
-            iface.config.metric.l2 = Some(metric);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.metric.l2 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::bfd::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let enabled = args.dnode.get_bool();
-            iface.config.bfd_enabled = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceBfdChange(iface_idx));
-        })
-        .path(isis::interfaces::interface::bfd::local_multiplier::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let local_multiplier = args.dnode.get_u8();
-            iface.config.bfd_params.local_multiplier = local_multiplier;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceBfdChange(iface_idx));
-        })
-        .path(isis::interfaces::interface::bfd::desired_min_tx_interval::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let min_tx = args.dnode.get_u32();
-            iface.config.bfd_params.min_tx = min_tx;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceBfdChange(iface_idx));
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::interfaces::interface::bfd::required_min_rx_interval::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let min_rx = args.dnode.get_u32();
-            iface.config.bfd_params.min_rx = min_rx;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceBfdChange(iface_idx));
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::interfaces::interface::bfd::min_interval::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let min_interval = args.dnode.get_u32();
-            iface.config.bfd_params.min_tx = min_interval;
-            iface.config.bfd_params.min_rx = min_interval;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceBfdChange(iface_idx));
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::interfaces::interface::address_families::address_family_list::PATH)
-        .create_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let af = args.dnode.get_string_relative("address-family").unwrap();
-            let af = AddressFamily::try_from_yang(&af).unwrap();
-            iface.config.afs.insert(af);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, af) = args.list_entry.into_interface_address_family().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.afs.remove(&af);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let iface_idx = list_entry.into_interface().unwrap();
-            let af = dnode.get_string_relative("address-family").unwrap();
-            let af = AddressFamily::try_from_yang(&af).unwrap();
-            ListEntry::InterfaceAddressFamily(iface_idx, af)
-        })
-        .path(isis::interfaces::interface::topologies::topology::PATH)
-        .create_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let name = args.dnode.get_string_relative("name").unwrap();
-            let mt_id = MtId::try_from_yang(&name).unwrap();
-            iface.config.mt.insert(mt_id, InterfaceMtCfg::default());
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, mt_id) = args.list_entry.into_interface_topology().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.mt.remove(&mt_id);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .lookup(|_context, list_entry, dnode| {
-            let iface_idx = list_entry.into_interface().unwrap();
-            let name = dnode.get_string_relative("name").unwrap();
-            let mt_id = MtId::try_from_yang(&name).unwrap();
-            ListEntry::InterfaceTopology(iface_idx, mt_id)
-        })
-        .path(isis::interfaces::interface::topologies::topology::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let (iface_idx, mt_id) = args.list_entry.into_interface_topology().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let iface_mt_cfg = iface.config.mt.get_mut(&mt_id).unwrap();
-
-            let enabled = args.dnode.get_bool();
-            iface_mt_cfg.enabled = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::topologies::topology::metric::value::PATH)
-        .modify_apply(|instance, args| {
-            let (iface_idx, mt_id) = args.list_entry.into_interface_topology().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let iface_mt_cfg = iface.config.mt.get_mut(&mt_id).unwrap();
-
-            let metric = args.dnode.get_u32();
-            iface_mt_cfg.metric.all = metric;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::topologies::topology::metric::level_1::value::PATH)
-        .modify_apply(|instance, args| {
-            let (iface_idx, mt_id) = args.list_entry.into_interface_topology().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let iface_mt_cfg = iface.config.mt.get_mut(&mt_id).unwrap();
-
-            let metric = args.dnode.get_u32();
-            iface_mt_cfg.metric.l1 = Some(metric);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, mt_id) = args.list_entry.into_interface_topology().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let iface_mt_cfg = iface.config.mt.get_mut(&mt_id).unwrap();
-
-            iface_mt_cfg.metric.l1 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::topologies::topology::metric::level_2::value::PATH)
-        .modify_apply(|instance, args| {
-            let (iface_idx, mt_id) = args.list_entry.into_interface_topology().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let iface_mt_cfg = iface.config.mt.get_mut(&mt_id).unwrap();
-
-            let metric = args.dnode.get_u32();
-            iface_mt_cfg.metric.l2 = Some(metric);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, mt_id) = args.list_entry.into_interface_topology().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let iface_mt_cfg = iface.config.mt.get_mut(&mt_id).unwrap();
-
-            iface_mt_cfg.metric.l2 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::isis_asla::interface_asla::PATH)
-        .create_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let app = args.dnode.get_string_relative("link-attr-app").unwrap();
-            let app = StandardApp::try_from_yang(&app).unwrap();
-            iface.config.asla.insert(app, InterfaceAslaCfg::default());
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, app) = args.list_entry.into_interface_asla().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.asla.remove(&app);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let iface_idx = list_entry.into_interface().unwrap();
-            let app = dnode.get_string_relative("link-attr-app").unwrap();
-            let app = StandardApp::try_from_yang(&app).unwrap();
-            ListEntry::InterfaceAsla(iface_idx, app)
-        })
-        .path(isis::interfaces::interface::isis_asla::interface_asla::te_metric::PATH)
-        .modify_apply(|instance, args| {
-            let (iface_idx, app) = args.list_entry.into_interface_asla().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let asla_cfg = iface.config.asla.get_mut(&app).unwrap();
-
-            let metric = args.dnode.get_u32();
-            asla_cfg.te_metric = Some(metric);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, app) = args.list_entry.into_interface_asla().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let asla_cfg = iface.config.asla.get_mut(&app).unwrap();
-
-            asla_cfg.te_metric = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::isis_asla::interface_asla::admin_group::PATH)
-        .modify_apply(|instance, args| {
-            let (iface_idx, app) = args.list_entry.into_interface_asla().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let asla_cfg = iface.config.asla.get_mut(&app).unwrap();
-
-            let admin_group = args.dnode.get_string();
-            let admin_group = HexString::try_from_yang(&admin_group).unwrap();
-            let admin_group = admin_group.0.iter().fold(0u32, |acc, &b| (acc << 8) | u32::from(b));
-            asla_cfg.admin_group = Some(admin_group);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, app) = args.list_entry.into_interface_asla().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-            let asla_cfg = iface.config.asla.get_mut(&app).unwrap();
-
-            asla_cfg.admin_group = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::extended_sequence_number::mode::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let ext_seqnum_mode = args.dnode.get_string();
-            let ext_seqnum_mode = ExtendedSeqNumMode::try_from_yang(&ext_seqnum_mode).unwrap();
-            iface.config.ext_seqnum_mode.all = Some(ext_seqnum_mode);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.ext_seqnum_mode.all = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::extended_sequence_number::level_1::mode::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let ext_seqnum_mode = args.dnode.get_string();
-            let ext_seqnum_mode = ExtendedSeqNumMode::try_from_yang(&ext_seqnum_mode).unwrap();
-            iface.config.ext_seqnum_mode.l1 = Some(ext_seqnum_mode);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.ext_seqnum_mode.l1 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
-        })
-        .path(isis::interfaces::interface::extended_sequence_number::level_2::mode::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let ext_seqnum_mode = args.dnode.get_string();
-            let ext_seqnum_mode = ExtendedSeqNumMode::try_from_yang(&ext_seqnum_mode).unwrap();
-            iface.config.ext_seqnum_mode.l2 = Some(ext_seqnum_mode);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            iface.config.ext_seqnum_mode.l2 = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
-        })
-        .path(isis::interfaces::interface::csnp_disable::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let csnp_disable = args.dnode.get_bool();
-            iface.config.csnp_disable = csnp_disable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateCsnpInterval(iface_idx));
-        })
-        .delete_apply(|_instance, _args| {
-            // Nothing to do.
-        })
-        .path(isis::interfaces::interface::trace_options::flag::PATH)
-        .create_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let trace_opt = args.dnode.get_string_relative("name").unwrap();
-            let trace_opt = InterfaceTraceOption::try_from_yang(&trace_opt).unwrap();
-            let trace_opts = &mut iface.config.trace_opts;
-            match trace_opt {
-                InterfaceTraceOption::PacketsAll => {
-                    trace_opts.packets.all.get_or_insert_default();
+        }
+        InterfaceChange::Delete => {
+            let iface = instance.arenas.interfaces.get_by_name(ifname).ok_or(ApplyError::EntryNotFound)?;
+            event_queue.insert(Event::InterfaceDelete(iface.index));
+        }
+        InterfaceChange::Entry(change) => {
+            let iface = instance.arenas.interfaces.get_mut_by_name(ifname).ok_or(ApplyError::EntryNotFound)?;
+            let iface_idx = iface.index;
+
+            match change {
+                InterfaceEntryChange::Enabled(enabled) => {
+                    iface.config.enabled = enabled;
+                    event_queue.insert(Event::InterfaceUpdate(iface_idx));
                 }
-                InterfaceTraceOption::PacketsHello => {
-                    trace_opts.packets.hello.get_or_insert_default();
+                InterfaceEntryChange::LevelType(level_type) => {
+                    iface.config.level_type.explicit = Some(level_type);
+                    iface.config.level_type.resolved = iface.config.resolved_level_type(&instance.config);
+
+                    // TODO: We can do better than a full reset.
+                    event_queue.insert(Event::InterfaceReset(iface_idx));
                 }
-                InterfaceTraceOption::PacketsPsnp => {
-                    trace_opts.packets.psnp.get_or_insert_default();
+                InterfaceEntryChange::LspPacingInterval(lsp_pacing_interval) => {
+                    iface.config.lsp_pacing_interval = lsp_pacing_interval;
                 }
-                InterfaceTraceOption::PacketsCsnp => {
-                    trace_opts.packets.csnp.get_or_insert_default();
+                InterfaceEntryChange::LspRetransmitInterval(lsp_rxmt_interval) => {
+                    iface.config.lsp_rxmt_interval = lsp_rxmt_interval;
                 }
-                InterfaceTraceOption::PacketsLsp => {
-                    trace_opts.packets.lsp.get_or_insert_default();
+                InterfaceEntryChange::Passive(passive) => {
+                    iface.config.passive = passive;
+                    event_queue.insert(Event::InterfaceReset(iface_idx));
+                }
+                InterfaceEntryChange::CsnpInterval(csnp_interval) => {
+                    iface.config.csnp_interval = csnp_interval;
+                    event_queue.insert(Event::InterfaceUpdateCsnpInterval(iface_idx));
+                }
+                InterfaceEntryChange::CsnpDisable(csnp_disable) => {
+                    if let Some(csnp_disable) = csnp_disable {
+                        iface.config.csnp_disable = csnp_disable;
+                        event_queue.insert(Event::InterfaceUpdateCsnpInterval(iface_idx));
+                    }
+                }
+                InterfaceEntryChange::HelloPaddingEnabled(hello_padding) => {
+                    iface.config.hello_padding = hello_padding;
+                    event_queue.insert(Event::InterfaceRestartNetwork(iface_idx));
+                }
+                InterfaceEntryChange::InterfaceType(interface_type) => {
+                    iface.config.interface_type = interface_type;
+                    event_queue.insert(Event::InterfaceReset(iface_idx));
+                }
+                InterfaceEntryChange::NodeFlag(enabled) => {
+                    iface.config.node_flag = enabled;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::ReoriginateLsps(level));
+                    }
+                }
+                InterfaceEntryChange::HelloAuthenticationKeyChain(keychain) => {
+                    iface.config.hello_auth.all.keychain = keychain;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationKey(key) => {
+                    iface.config.hello_auth.all.key = key;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationKeyId(key_id) => {
+                    iface.config.hello_auth.all.key_id = key_id;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationCryptoAlgorithm(algo) => {
+                    iface.config.hello_auth.all.algo = algo;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationLevel1KeyChain(keychain) => {
+                    iface.config.hello_auth.l1.keychain = keychain;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationLevel1Key(key) => {
+                    iface.config.hello_auth.l1.key = key;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationLevel1KeyId(key_id) => {
+                    iface.config.hello_auth.l1.key_id = key_id;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationLevel1CryptoAlgorithm(algo) => {
+                    iface.config.hello_auth.l1.algo = algo;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationLevel2KeyChain(keychain) => {
+                    iface.config.hello_auth.l2.keychain = keychain;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationLevel2Key(key) => {
+                    iface.config.hello_auth.l2.key = key;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationLevel2KeyId(key_id) => {
+                    iface.config.hello_auth.l2.key_id = key_id;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloAuthenticationLevel2CryptoAlgorithm(algo) => {
+                    iface.config.hello_auth.l2.algo = algo;
+                    event_queue.insert(Event::InterfaceUpdateAuth(iface_idx));
+                }
+                InterfaceEntryChange::HelloIntervalValue(hello_interval) => {
+                    iface.config.hello_interval.all = hello_interval;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, level));
+                    }
+                }
+                InterfaceEntryChange::HelloIntervalLevel1Value(hello_interval) => {
+                    iface.config.hello_interval.l1 = hello_interval;
+                    event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
+                }
+                InterfaceEntryChange::HelloIntervalLevel2Value(hello_interval) => {
+                    iface.config.hello_interval.l2 = hello_interval;
+                    event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
+                }
+                InterfaceEntryChange::HelloMultiplierValue(hello_multiplier) => {
+                    iface.config.hello_multiplier.all = hello_multiplier;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, level));
+                    }
+                }
+                InterfaceEntryChange::HelloMultiplierLevel1Value(hello_multiplier) => {
+                    iface.config.hello_multiplier.l1 = hello_multiplier;
+                    event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
+                }
+                InterfaceEntryChange::HelloMultiplierLevel2Value(hello_multiplier) => {
+                    iface.config.hello_multiplier.l2 = hello_multiplier;
+                    event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
+                }
+                InterfaceEntryChange::PriorityValue(priority) => {
+                    iface.config.priority.all = priority;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::InterfacePriorityChange(iface_idx, level));
+                        event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, level));
+                    }
+                }
+                InterfaceEntryChange::PriorityLevel1Value(priority) => {
+                    iface.config.priority.l1 = priority;
+                    event_queue.insert(Event::InterfacePriorityChange(iface_idx, LevelNumber::L1));
+                    event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
+                }
+                InterfaceEntryChange::PriorityLevel2Value(priority) => {
+                    iface.config.priority.l2 = priority;
+                    event_queue.insert(Event::InterfacePriorityChange(iface_idx, LevelNumber::L2));
+                    event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
+                }
+                InterfaceEntryChange::MetricValue(metric) => {
+                    iface.config.metric.all = metric;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::ReoriginateLsps(level));
+                    }
+                }
+                InterfaceEntryChange::MetricLevel1Value(metric) => {
+                    iface.config.metric.l1 = metric;
+                    event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
+                }
+                InterfaceEntryChange::MetricLevel2Value(metric) => {
+                    iface.config.metric.l2 = metric;
+                    event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
+                }
+                InterfaceEntryChange::BfdEnabled(enabled) => {
+                    iface.config.bfd_enabled = enabled;
+                    event_queue.insert(Event::InterfaceBfdChange(iface_idx));
+                }
+                InterfaceEntryChange::BfdLocalMultiplier(local_multiplier) => {
+                    iface.config.bfd_params.local_multiplier = local_multiplier;
+                    event_queue.insert(Event::InterfaceBfdChange(iface_idx));
+                }
+                InterfaceEntryChange::BfdDesiredMinTxInterval(min_tx) => {
+                    if let Some(min_tx) = min_tx {
+                        iface.config.bfd_params.min_tx = min_tx;
+                        event_queue.insert(Event::InterfaceBfdChange(iface_idx));
+                    }
+                }
+                InterfaceEntryChange::BfdRequiredMinRxInterval(min_rx) => {
+                    if let Some(min_rx) = min_rx {
+                        iface.config.bfd_params.min_rx = min_rx;
+                        event_queue.insert(Event::InterfaceBfdChange(iface_idx));
+                    }
+                }
+                InterfaceEntryChange::BfdMinInterval(min_interval) => {
+                    if let Some(min_interval) = min_interval {
+                        iface.config.bfd_params.min_tx = min_interval;
+                        iface.config.bfd_params.min_rx = min_interval;
+                        event_queue.insert(Event::InterfaceBfdChange(iface_idx));
+                    }
+                }
+                InterfaceEntryChange::AddressFamilyList(keys, change) => {
+                    apply_interface_address_family(iface, keys.address_family, change, event_queue)?;
+                }
+                InterfaceEntryChange::Topology(keys, change) => {
+                    apply_interface_topology(iface, keys.name, change, event_queue)?;
+                }
+                InterfaceEntryChange::IsisAslaInterfaceAsla(keys, change) => {
+                    apply_interface_asla(iface, keys.link_attr_app, change, event_queue)?;
+                }
+                InterfaceEntryChange::ExtendedSequenceNumberMode(mode) => {
+                    iface.config.ext_seqnum_mode.all = mode;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, level));
+                    }
+                }
+                InterfaceEntryChange::ExtendedSequenceNumberLevel1Mode(mode) => {
+                    iface.config.ext_seqnum_mode.l1 = mode;
+                    event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L1));
+                }
+                InterfaceEntryChange::ExtendedSequenceNumberLevel2Mode(mode) => {
+                    iface.config.ext_seqnum_mode.l2 = mode;
+                    event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, LevelNumber::L2));
+                }
+                InterfaceEntryChange::TraceOptionsFlag(keys, change) => {
+                    apply_interface_trace_options(iface, keys.name, change, event_queue)?;
                 }
             }
+        }
+    }
 
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateTraceOptions(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, trace_opt) = args.list_entry.into_interface_trace_option().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let trace_opts = &mut iface.config.trace_opts;
-            match trace_opt {
-                InterfaceTraceOption::PacketsAll => trace_opts.packets.all = None,
-                InterfaceTraceOption::PacketsHello => trace_opts.packets.hello = None,
-                InterfaceTraceOption::PacketsPsnp => trace_opts.packets.psnp = None,
-                InterfaceTraceOption::PacketsCsnp => trace_opts.packets.csnp = None,
-                InterfaceTraceOption::PacketsLsp => trace_opts.packets.lsp = None,
-            }
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateTraceOptions(iface_idx));
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let iface_idx = list_entry.into_interface().unwrap();
-            let trace_opt = dnode.get_string_relative("name").unwrap();
-            let trace_opt = InterfaceTraceOption::try_from_yang(&trace_opt).unwrap();
-            ListEntry::InterfaceTraceOption(iface_idx, trace_opt)
-        })
-        .path(isis::interfaces::interface::trace_options::flag::send::PATH)
-        .modify_apply(|instance, args| {
-            let (iface_idx, trace_opt) = args.list_entry.into_interface_trace_option().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut iface.config.trace_opts;
-            let Some(trace_opt_packet) = (match trace_opt {
-                InterfaceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
-                InterfaceTraceOption::PacketsHello => trace_opts.packets.hello.as_mut(),
-                InterfaceTraceOption::PacketsPsnp => trace_opts.packets.psnp.as_mut(),
-                InterfaceTraceOption::PacketsCsnp => trace_opts.packets.csnp.as_mut(),
-                InterfaceTraceOption::PacketsLsp => trace_opts.packets.lsp.as_mut(),
-            }) else {
-                return;
-            };
-            trace_opt_packet.tx = enable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateTraceOptions(iface_idx));
-        })
-        .path(isis::interfaces::interface::trace_options::flag::receive::PATH)
-        .modify_apply(|instance, args| {
-            let (iface_idx, trace_opt) = args.list_entry.into_interface_trace_option().unwrap();
-            let iface = &mut instance.arenas.interfaces[iface_idx];
-
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut iface.config.trace_opts;
-            let Some(trace_opt_packet) = (match trace_opt {
-                InterfaceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
-                InterfaceTraceOption::PacketsHello => trace_opts.packets.hello.as_mut(),
-                InterfaceTraceOption::PacketsPsnp => trace_opts.packets.psnp.as_mut(),
-                InterfaceTraceOption::PacketsCsnp => trace_opts.packets.csnp.as_mut(),
-                InterfaceTraceOption::PacketsLsp => trace_opts.packets.lsp.as_mut(),
-            }) else {
-                return;
-            };
-            trace_opt_packet.rx = enable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceUpdateTraceOptions(iface_idx));
-        })
-        .path(isis::bier::mt_id::PATH)
-        .modify_apply(|instance, args| {
-            let mt_id = args.dnode.get_u8();
-            instance.config.bier.mt_id = mt_id;
-
-            // TODO: should reoriginate LSP
-        })
-        .delete_apply(|instance, _args| {
-            let mt_id = 0;
-            instance.config.bier.mt_id = mt_id;
-        })
-        .path(isis::bier::bier::enable::PATH)
-        .modify_apply(|instance, args| {
-            let enable = args.dnode.get_bool();
-            instance.config.bier.enabled = enable;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .path(isis::bier::bier::advertise::PATH)
-        .modify_apply(|instance, args| {
-            let advertise = args.dnode.get_bool();
-            instance.config.bier.advertise = advertise;
-        })
-        .path(isis::bier::bier::receive::PATH)
-        .modify_apply(|instance, args| {
-            let receive = args.dnode.get_bool();
-            instance.config.bier.receive = receive;
-        })
-        .path(isis::spb::enable::PATH)
-        .modify_apply(|instance, args| {
-            let enable = args.dnode.get_bool();
-            instance.config.spb.enabled = enable;
-        })
-        .path(isis::spb::service::PATH)
-        .create_apply(|instance, args| {
-            let bmac = args.dnode.get_mac_relative("bmac").unwrap();
-            let base_vid = args.dnode.get_u16_relative("base-vid").unwrap();
-            let key = SpbServiceKey {
-                bmac,
-                base_vid,
-            };
-            instance.config.spb.services.insert(key, SpbServiceCfg::default());
-        })
-        .delete_apply(|instance, args| {
-            let svc_key = args.list_entry.into_spb_service().unwrap();
-            instance.config.spb.services.remove(&svc_key);
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let bmac = dnode.get_mac_relative("bmac").unwrap();
-            let base_vid = dnode.get_u16_relative("base-vid").unwrap();
-            let key = SpbServiceKey {
-                bmac,
-                base_vid,
-            };
-            ListEntry::SpbService(key)
-        })
-        .path(isis::spb::service::isid::PATH)
-        .create_apply(|instance, args| {
-            let svc_key = args.list_entry.as_spb_service().unwrap().clone();
-            let isid = args.dnode.get_u32_relative("value").unwrap();
-            if let Some(service) = instance.config.spb.services.get_mut(&svc_key) {
-                service.isids.insert(isid, SpbIsidCfg::default());
-            }
-        })
-        .delete_apply(|instance, args| {
-            let (svc_key, isid) = args.list_entry.as_spb_isid().unwrap();
-            if let Some(service) = instance.config.spb.services.get_mut(svc_key) {
-                service.isids.remove(isid);
-            }
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let svc_key = list_entry.as_spb_service().unwrap().clone();
-            let isid = dnode.get_u32_relative("value").unwrap();
-            ListEntry::SpbIsid(svc_key, isid)
-        })
-        .path(isis::spb::service::isid::transmit::PATH)
-        .modify_apply(|instance, args| {
-            let (svc_key, isid) = args.list_entry.as_spb_isid().unwrap();
-            let transmit = args.dnode.get_bool();
-            if let Some(isid_cfg) = instance.config.spb.services.get_mut(svc_key).and_then(|service| service.isids.get_mut(isid)) {
-                isid_cfg.transmit = transmit;
-            }
-        })
-        .path(isis::spb::service::isid::receive::PATH)
-        .modify_apply(|instance, args| {
-            let (svc_key, isid) = args.list_entry.as_spb_isid().unwrap();
-            let receive = args.dnode.get_bool();
-            if let Some(isid_cfg) = instance.config.spb.services.get_mut(svc_key).and_then(|service| service.isids.get_mut(isid)) {
-                isid_cfg.receive = receive;
-            }
-        })
-        .path(isis::segment_routing::enabled::PATH)
-        .modify_apply(|instance, args| {
-            let enabled = args.dnode.get_bool();
-            instance.config.sr.enabled = enabled;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::SrEnabledChange(enabled));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L1));
-            event_queue.insert(Event::ReoriginateLsps(LevelNumber::L2));
-        })
-        .build()
+    Ok(())
 }
 
-fn load_validation_callbacks() -> ValidationCallbacks {
-    ValidationCallbacksBuilder::default()
-        .path(isis::topologies::topology::PATH)
-        .validate(|args| {
-            let valid_options = [MtId::Ipv6Unicast.to_yang()];
+fn apply_interface_address_family(iface: &mut Interface, af: AddressFamily, change: InterfaceAddressFamilyListChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        InterfaceAddressFamilyListChange::Create => {
+            iface.config.afs.insert(af);
+        }
+        InterfaceAddressFamilyListChange::Delete => {
+            iface.config.afs.remove(&af);
+        }
+    }
+    for level in LevelType::All {
+        event_queue.insert(Event::ReoriginateLsps(level));
+    }
 
-            let name = args.dnode.get_string_relative("name").unwrap();
-            if !valid_options.iter().any(|option| *option == name) {
-                return Err(format!("unsupported topology name (valid options: \"{}\")", valid_options.join(", "),));
+    Ok(())
+}
+
+fn apply_interface_topology(iface: &mut Interface, mt_id: MtId, change: InterfaceTopologyChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    let iface_idx = iface.index;
+
+    match change {
+        InterfaceTopologyChange::Create => {
+            iface.config.mt.insert(mt_id, InterfaceMtCfg::default());
+            for level in LevelType::All {
+                event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, level));
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        InterfaceTopologyChange::Delete => {
+            iface.config.mt.remove(&mt_id);
+            for level in LevelType::All {
+                event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, level));
+                event_queue.insert(Event::ReoriginateLsps(level));
+            }
+        }
+        InterfaceTopologyChange::Entry(change) => {
+            let iface_mt_cfg = iface.config.mt.get_mut(&mt_id).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                InterfaceTopologyEntryChange::Enabled(enabled) => {
+                    iface_mt_cfg.enabled = enabled;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::InterfaceUpdateHelloInterval(iface_idx, level));
+                        event_queue.insert(Event::ReoriginateLsps(level));
+                    }
+                }
+                InterfaceTopologyEntryChange::MetricValue(metric) => {
+                    iface_mt_cfg.metric.all = metric;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::ReoriginateLsps(level));
+                    }
+                }
+                InterfaceTopologyEntryChange::MetricLevel1Value(metric) => {
+                    iface_mt_cfg.metric.l1 = metric;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::ReoriginateLsps(level));
+                    }
+                }
+                InterfaceTopologyEntryChange::MetricLevel2Value(metric) => {
+                    iface_mt_cfg.metric.l2 = metric;
+                    for level in LevelType::All {
+                        event_queue.insert(Event::ReoriginateLsps(level));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_interface_asla(iface: &mut Interface, app: StandardApp, change: InterfaceIsisAslaInterfaceAslaChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        InterfaceIsisAslaInterfaceAslaChange::Create => {
+            iface.config.asla.insert(app, InterfaceAslaCfg::default());
+        }
+        InterfaceIsisAslaInterfaceAslaChange::Delete => {
+            iface.config.asla.remove(&app);
+        }
+        InterfaceIsisAslaInterfaceAslaChange::Entry(change) => {
+            let asla_cfg = iface.config.asla.get_mut(&app).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                InterfaceIsisAslaInterfaceAslaEntryChange::TeMetric(metric) => {
+                    asla_cfg.te_metric = metric;
+                }
+                InterfaceIsisAslaInterfaceAslaEntryChange::AdminGroup(admin_group) => {
+                    asla_cfg.admin_group = admin_group.map(|admin_group| admin_group.0.iter().fold(0u32, |acc, &b| (acc << 8) | u32::from(b)));
+                }
+            }
+        }
+    }
+    for level in LevelType::All {
+        event_queue.insert(Event::ReoriginateLsps(level));
+    }
+
+    Ok(())
+}
+
+fn apply_interface_trace_options(iface: &mut Interface, trace_opt: InterfaceTraceOption, change: InterfaceTraceOptionsFlagChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    let iface_idx = iface.index;
+    let trace_opts = &mut iface.config.trace_opts;
+    match change {
+        InterfaceTraceOptionsFlagChange::Create => match trace_opt {
+            InterfaceTraceOption::PacketsAll => {
+                trace_opts.packets.all.get_or_insert_default();
+            }
+            InterfaceTraceOption::PacketsHello => {
+                trace_opts.packets.hello.get_or_insert_default();
+            }
+            InterfaceTraceOption::PacketsPsnp => {
+                trace_opts.packets.psnp.get_or_insert_default();
+            }
+            InterfaceTraceOption::PacketsCsnp => {
+                trace_opts.packets.csnp.get_or_insert_default();
+            }
+            InterfaceTraceOption::PacketsLsp => {
+                trace_opts.packets.lsp.get_or_insert_default();
+            }
+        },
+        InterfaceTraceOptionsFlagChange::Delete => match trace_opt {
+            InterfaceTraceOption::PacketsAll => trace_opts.packets.all = None,
+            InterfaceTraceOption::PacketsHello => trace_opts.packets.hello = None,
+            InterfaceTraceOption::PacketsPsnp => trace_opts.packets.psnp = None,
+            InterfaceTraceOption::PacketsCsnp => trace_opts.packets.csnp = None,
+            InterfaceTraceOption::PacketsLsp => trace_opts.packets.lsp = None,
+        },
+        InterfaceTraceOptionsFlagChange::Entry(change) => {
+            let trace_opt_packet = match trace_opt {
+                InterfaceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
+                InterfaceTraceOption::PacketsHello => trace_opts.packets.hello.as_mut(),
+                InterfaceTraceOption::PacketsPsnp => trace_opts.packets.psnp.as_mut(),
+                InterfaceTraceOption::PacketsCsnp => trace_opts.packets.csnp.as_mut(),
+                InterfaceTraceOption::PacketsLsp => trace_opts.packets.lsp.as_mut(),
+            };
+            let Some(trace_opt_packet) = trace_opt_packet else {
+                return Ok(());
+            };
+            match change {
+                InterfaceTraceOptionsFlagEntryChange::Send(enable) => {
+                    trace_opt_packet.tx = enable;
+                }
+                InterfaceTraceOptionsFlagEntryChange::Receive(enable) => {
+                    trace_opt_packet.rx = enable;
+                }
+            }
+        }
+    }
+    event_queue.insert(Event::InterfaceUpdateTraceOptions(iface_idx));
+
+    Ok(())
+}
+
+fn apply_summary_prefix(instance: &mut Instance, prefix: IpNetwork, change: InterLevelPropagationPoliciesLevel1ToLevel2SummaryPrefixesChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        InterLevelPropagationPoliciesLevel1ToLevel2SummaryPrefixesChange::Create => {
+            instance.config.summaries.insert(prefix, SummaryCfg::default());
+        }
+        InterLevelPropagationPoliciesLevel1ToLevel2SummaryPrefixesChange::Delete => {
+            instance.config.summaries.remove(&prefix);
+        }
+        InterLevelPropagationPoliciesLevel1ToLevel2SummaryPrefixesChange::Entry(InterLevelPropagationPoliciesLevel1ToLevel2SummaryPrefixesEntryChange::Metric(metric)) => {
+            let summary_cfg = instance.config.summaries.get_mut(&prefix).ok_or(ApplyError::EntryNotFound)?;
+            summary_cfg.metric = metric;
+        }
+    }
+    event_queue.insert(Event::RerunSpf);
+
+    Ok(())
+}
+
+fn apply_trace_options(instance: &mut Instance, trace_opt: InstanceTraceOption, change: TraceOptionsFlagChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    let trace_opts = &mut instance.config.trace_opts;
+    match change {
+        TraceOptionsFlagChange::Create => match trace_opt {
+            InstanceTraceOption::FloodReduction => trace_opts.flood_reduction = true,
+            InstanceTraceOption::InternalBus => trace_opts.ibus = true,
+            InstanceTraceOption::Lsdb => trace_opts.lsdb = true,
+            InstanceTraceOption::Spf => trace_opts.spf = true,
+            InstanceTraceOption::PacketsAll => {
+                trace_opts.packets.all.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsHello => {
+                trace_opts.packets.hello.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsPsnp => {
+                trace_opts.packets.psnp.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsCsnp => {
+                trace_opts.packets.csnp.get_or_insert_default();
+            }
+            InstanceTraceOption::PacketsLsp => {
+                trace_opts.packets.lsp.get_or_insert_default();
+            }
+        },
+        TraceOptionsFlagChange::Delete => match trace_opt {
+            InstanceTraceOption::FloodReduction => trace_opts.flood_reduction = false,
+            InstanceTraceOption::InternalBus => trace_opts.ibus = false,
+            InstanceTraceOption::Lsdb => trace_opts.lsdb = false,
+            InstanceTraceOption::Spf => trace_opts.spf = false,
+            InstanceTraceOption::PacketsAll => trace_opts.packets.all = None,
+            InstanceTraceOption::PacketsHello => trace_opts.packets.hello = None,
+            InstanceTraceOption::PacketsPsnp => trace_opts.packets.psnp = None,
+            InstanceTraceOption::PacketsCsnp => trace_opts.packets.csnp = None,
+            InstanceTraceOption::PacketsLsp => trace_opts.packets.lsp = None,
+        },
+        TraceOptionsFlagChange::Entry(change) => {
+            let trace_opt_packet = match trace_opt {
+                InstanceTraceOption::PacketsAll => trace_opts.packets.all.as_mut(),
+                InstanceTraceOption::PacketsHello => trace_opts.packets.hello.as_mut(),
+                InstanceTraceOption::PacketsPsnp => trace_opts.packets.psnp.as_mut(),
+                InstanceTraceOption::PacketsCsnp => trace_opts.packets.csnp.as_mut(),
+                InstanceTraceOption::PacketsLsp => trace_opts.packets.lsp.as_mut(),
+                _ => None,
+            };
+            let Some(trace_opt_packet) = trace_opt_packet else {
+                return Ok(());
+            };
+            match change {
+                TraceOptionsFlagEntryChange::Send(enable) => {
+                    trace_opt_packet.tx = enable;
+                }
+                TraceOptionsFlagEntryChange::Receive(enable) => {
+                    trace_opt_packet.rx = enable;
+                }
+            }
+        }
+    }
+    event_queue.insert(Event::UpdateTraceOptions);
+
+    Ok(())
+}
+
+fn apply_spb_service(instance: &mut Instance, key: SpbServiceKey, change: SpbServiceChange) -> Result<(), ApplyError> {
+    match change {
+        SpbServiceChange::Create => {
+            instance.config.spb.services.insert(key, SpbServiceCfg::default());
+        }
+        SpbServiceChange::Delete => {
+            instance.config.spb.services.remove(&key);
+        }
+        SpbServiceChange::Entry(SpbServiceEntryChange::Isid(keys, change)) => {
+            let service = instance.config.spb.services.get_mut(&key).ok_or(ApplyError::EntryNotFound)?;
+            apply_spb_isid(service, keys.value, change)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_spb_isid(service: &mut SpbServiceCfg, isid: u32, change: SpbServiceIsidChange) -> Result<(), ApplyError> {
+    match change {
+        SpbServiceIsidChange::Create => {
+            service.isids.insert(isid, SpbIsidCfg::default());
+        }
+        SpbServiceIsidChange::Delete => {
+            service.isids.remove(&isid);
+        }
+        SpbServiceIsidChange::Entry(change) => {
+            let isid_cfg = service.isids.get_mut(&isid).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                SpbServiceIsidEntryChange::Transmit(transmit) => {
+                    isid_cfg.transmit = transmit;
+                }
+                SpbServiceIsidEntryChange::Receive(receive) => {
+                    isid_cfg.receive = receive;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn process_event(instance: &mut Instance, event: Event) {
+    match event {
+        Event::InstanceReset => instance.reset(),
+        Event::InstanceUpdate => {
+            instance.update();
+        }
+        Event::InstanceLevelTypeUpdate => {
+            for iface in instance.arenas.interfaces.iter_mut() {
+                iface.config.level_type.resolved = iface.config.resolved_level_type(&instance.config);
+            }
+        }
+        Event::InstanceTopologyUpdate => {
+            if let Some((instance, arenas)) = instance.as_up() {
+                for iface in arenas.interfaces.iter_mut().filter(|iface| iface.state.active && !iface.is_passive()) {
+                    iface.hello_interval_start(&instance, LevelType::All);
+                }
+            }
+        }
+        Event::InterfaceUpdate(iface_idx) => {
+            if let Some((mut instance, arenas)) = instance.as_up() {
+                let iface = &mut arenas.interfaces[iface_idx];
+                if let Err(error) = iface.update(&mut instance, &mut arenas.adjacencies) {
+                    error.log();
+                }
+            }
+        }
+        Event::InterfaceDelete(iface_idx) => {
+            if let Some((mut instance, arenas)) = instance.as_up() {
+                let iface = &mut arenas.interfaces[iface_idx];
+
+                // Cancel ibus subscription.
+                instance.tx.ibus.interface_unsub(Some(iface.name.clone()));
+
+                // Stop interface if it's active.
+                let reason = InterfaceInactiveReason::AdminDown;
+                iface.stop(&mut instance, &mut arenas.adjacencies, reason);
+
+                // Update the routing table to remove nexthops that are no
+                // longer reachable.
+                for route in instance.state.rib_mut(instance.config.level_type).values_mut() {
+                    route.nexthops.retain(|_, nexthop| nexthop.iface_idx != iface_idx);
+                }
             }
 
-            Ok(())
-        })
-        .build()
+            instance.arenas.interfaces.delete(iface_idx);
+        }
+        Event::InterfaceReset(iface_idx) => {
+            if let Some((mut instance, arenas)) = instance.as_up() {
+                let iface = &mut arenas.interfaces[iface_idx];
+                if let Err(error) = iface.reset(&mut instance, &mut arenas.adjacencies) {
+                    error.log();
+                }
+            }
+        }
+        Event::InterfaceRestartNetwork(iface_idx) => {
+            if let Some((mut instance, arenas)) = instance.as_up() {
+                let iface = &mut arenas.interfaces[iface_idx];
+                iface.restart_network_tasks(&mut instance);
+            }
+        }
+        Event::InstanceUpdateAuth => {
+            let auth = instance.config.auth.all.method(&instance.shared.keychains);
+            instance.config.auth_resolved.store(Arc::new(auth));
+        }
+        Event::InterfaceUpdateAuth(iface_idx) => {
+            let iface = &mut instance.arenas.interfaces[iface_idx];
+            let auth = iface.config.hello_auth.all.method(&instance.shared.keychains);
+            iface.config.hello_auth_resolved.store(Arc::new(auth));
+        }
+        Event::InterfacePriorityChange(iface_idx, level) => {
+            let Some((instance, arenas)) = instance.as_up() else {
+                return;
+            };
+            let iface = &mut arenas.interfaces[iface_idx];
+
+            // Schedule new DIS election.
+            if iface.state.active && !iface.is_passive() && iface.config.interface_type == InterfaceType::Broadcast {
+                instance.tx.protocol_input.dis_election(iface.id, level);
+            }
+        }
+        Event::InterfaceUpdateHelloInterval(iface_idx, level) => {
+            let Some((instance, arenas)) = instance.as_up() else {
+                return;
+            };
+            let iface = &mut arenas.interfaces[iface_idx];
+            if iface.state.active && !iface.is_passive() {
+                iface.hello_interval_start(&instance, level);
+            }
+        }
+        Event::InterfaceUpdateCsnpInterval(iface_idx) => {
+            let Some((instance, arenas)) = instance.as_up() else {
+                return;
+            };
+            let iface = &mut arenas.interfaces[iface_idx];
+            if iface.config.csnp_disable {
+                iface.csnp_interval_stop();
+            } else {
+                iface.csnp_interval_start(&instance);
+            }
+        }
+        Event::InterfaceBfdChange(iface_idx) => {
+            let Some((instance, arenas)) = instance.as_up() else {
+                return;
+            };
+            let iface = &mut arenas.interfaces[iface_idx];
+            iface.with_adjacencies(&mut arenas.adjacencies, |iface, adj| {
+                if iface.config.bfd_enabled {
+                    adj.bfd_update_sessions(iface, &instance, true);
+                } else {
+                    adj.bfd_clear_sessions(&instance);
+                }
+            });
+        }
+        Event::InterfaceUpdateTraceOptions(iface_idx) => {
+            let iface = &mut instance.arenas.interfaces[iface_idx];
+            iface.config.update_trace_options(&instance.config);
+        }
+        Event::InterfaceIbusSub(iface_idx) => {
+            let iface = &instance.arenas.interfaces[iface_idx];
+            instance.tx.ibus.interface_sub(Some(iface.name.clone()), None);
+        }
+        Event::ReoriginateLsps(level) => {
+            if let Some((mut instance, _)) = instance.as_up() {
+                instance.schedule_lsp_origination(level);
+            }
+        }
+        Event::RefreshLsps => {
+            if let Some((instance, arenas)) = instance.as_up() {
+                let system_id = instance.config.system_id.unwrap();
+                for level in instance.config.levels() {
+                    for lse in instance.state.lsdb.get(level).iter_for_system_id(&arenas.lsp_entries, system_id).filter(|lse| lse.data.rem_lifetime != 0) {
+                        instance.tx.protocol_input.lsp_refresh(level, lse.id);
+                    }
+                }
+            }
+        }
+        Event::RerunSpf => {
+            if let Some((instance, _)) = instance.as_up() {
+                for level in instance.config.levels() {
+                    instance.tx.protocol_input.spf_delay_event(level, spf::fsm::Event::ConfigChange);
+                }
+            }
+        }
+        Event::ReinstallRoutes => {
+            if let Some((instance, arenas)) = instance.as_up() {
+                for (prefix, route) in instance.state.rib(instance.config.level_type).iter().filter(|(_, route)| route.flags.contains(RouteFlags::INSTALLED)) {
+                    let distance = route.distance(instance.config);
+                    ibus::tx::route_install(&instance.tx.ibus, prefix, route, None, distance, &arenas.interfaces);
+                }
+            }
+        }
+        Event::OverloadChange(overload_status) => {
+            if let Some((instance, _)) = instance.as_up() {
+                // Update system counters.
+                if overload_status {
+                    instance.state.counters.l1.database_overload += 1;
+                    instance.state.counters.l2.database_overload += 1;
+                }
+
+                // Send YANG notification.
+                notification::database_overload(&instance, overload_status);
+            }
+        }
+        Event::SrEnabledChange(enabled) => {
+            let Some((instance, arenas)) = instance.as_up() else {
+                return;
+            };
+
+            // Iterate over all existing adjacencies.
+            for iface in arenas.interfaces.iter_mut() {
+                iface.with_adjacencies(&mut arenas.adjacencies, |iface, adj| {
+                    if enabled {
+                        sr::adj_sids_add(&instance, iface, adj);
+                    } else {
+                        sr::adj_sids_del(&instance, adj);
+                    }
+                });
+            }
+        }
+        Event::RedistributeAdd(af, protocol) => {
+            // Subscribe to route redistribution for the given protocol and
+            // address family.
+            instance.tx.ibus.route_redistribute_sub(protocol, Some(af));
+        }
+        Event::RedistributeDelete(af, level, protocol) => {
+            // Unsubscribe from route redistribution for the given protocol
+            // and address family.
+            instance.tx.ibus.route_redistribute_unsub(protocol, Some(af));
+
+            // Remove redistributed routes.
+            let routes = instance.system.routes.get_mut(level);
+            routes.retain(|prefix, route| prefix.address_family() != af || route.protocol != protocol);
+
+            // Schedule LSP reorigination.
+            if let Some((mut instance, _)) = instance.as_up() {
+                instance.schedule_lsp_origination(level);
+            }
+        }
+        Event::UpdateTraceOptions => {
+            for iface in instance.arenas.interfaces.iter_mut() {
+                iface.config.update_trace_options(&instance.config);
+            }
+        }
+    }
 }
 
 // ===== impl Instance =====
 
 impl Provider for Instance {
-    type ListEntry = ListEntry;
     type Event = Event;
     type Resource = Resource;
+    type Change = ConfigChange;
 
-    fn callbacks() -> &'static Callbacks<Instance> {
-        &CALLBACKS
+    const YANG_OPS_CONFIG: YangConfigOps<ConfigChange> = config::YANG_OPS_CONFIG;
+
+    fn apply(&mut self, change: ConfigChange, _resource: &mut Option<Resource>, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+        apply_instance(self, change, event_queue)
     }
 
     fn process_event(&mut self, event: Event) {
-        match event {
-            Event::InstanceReset => self.reset(),
-            Event::InstanceUpdate => {
-                self.update();
-            }
-            Event::InstanceLevelTypeUpdate => {
-                for iface in self.arenas.interfaces.iter_mut() {
-                    iface.config.level_type.resolved = iface.config.resolved_level_type(&self.config);
-                }
-            }
-            Event::InstanceTopologyUpdate => {
-                if let Some((instance, arenas)) = self.as_up() {
-                    for iface in arenas.interfaces.iter_mut().filter(|iface| iface.state.active && !iface.is_passive()) {
-                        iface.hello_interval_start(&instance, LevelType::All);
-                    }
-                }
-            }
-            Event::InterfaceUpdate(iface_idx) => {
-                if let Some((mut instance, arenas)) = self.as_up() {
-                    let iface = &mut arenas.interfaces[iface_idx];
-                    if let Err(error) = iface.update(&mut instance, &mut arenas.adjacencies) {
-                        error.log();
-                    }
-                }
-            }
-            Event::InterfaceDelete(iface_idx) => {
-                if let Some((mut instance, arenas)) = self.as_up() {
-                    let iface = &mut arenas.interfaces[iface_idx];
-
-                    // Cancel ibus subscription.
-                    instance.tx.ibus.interface_unsub(Some(iface.name.clone()));
-
-                    // Stop interface if it's active.
-                    let reason = InterfaceInactiveReason::AdminDown;
-                    iface.stop(&mut instance, &mut arenas.adjacencies, reason);
-
-                    // Update the routing table to remove nexthops that are no
-                    // longer reachable.
-                    for route in instance.state.rib_mut(instance.config.level_type).values_mut() {
-                        route.nexthops.retain(|_, nexthop| nexthop.iface_idx != iface_idx);
-                    }
-                }
-
-                self.arenas.interfaces.delete(iface_idx);
-            }
-            Event::InterfaceReset(iface_idx) => {
-                if let Some((mut instance, arenas)) = self.as_up() {
-                    let iface = &mut arenas.interfaces[iface_idx];
-                    if let Err(error) = iface.reset(&mut instance, &mut arenas.adjacencies) {
-                        error.log();
-                    }
-                }
-            }
-            Event::InterfaceRestartNetwork(iface_idx) => {
-                if let Some((mut instance, arenas)) = self.as_up() {
-                    let iface = &mut arenas.interfaces[iface_idx];
-                    iface.restart_network_tasks(&mut instance);
-                }
-            }
-            Event::InstanceUpdateAuth => {
-                let auth = self.config.auth.all.method(&self.shared.keychains);
-                self.config.auth_resolved.store(Arc::new(auth));
-            }
-            Event::InterfaceUpdateAuth(iface_idx) => {
-                let iface = &mut self.arenas.interfaces[iface_idx];
-                let auth = iface.config.hello_auth.all.method(&self.shared.keychains);
-                iface.config.hello_auth_resolved.store(Arc::new(auth));
-            }
-            Event::InterfacePriorityChange(iface_idx, level) => {
-                let Some((instance, arenas)) = self.as_up() else {
-                    return;
-                };
-                let iface = &mut arenas.interfaces[iface_idx];
-
-                // Schedule new DIS election.
-                if iface.state.active && !iface.is_passive() && iface.config.interface_type == InterfaceType::Broadcast {
-                    instance.tx.protocol_input.dis_election(iface.id, level);
-                }
-            }
-            Event::InterfaceUpdateHelloInterval(iface_idx, level) => {
-                let Some((instance, arenas)) = self.as_up() else {
-                    return;
-                };
-                let iface = &mut arenas.interfaces[iface_idx];
-                if iface.state.active && !iface.is_passive() {
-                    iface.hello_interval_start(&instance, level);
-                }
-            }
-            Event::InterfaceUpdateCsnpInterval(iface_idx) => {
-                let Some((instance, arenas)) = self.as_up() else {
-                    return;
-                };
-                let iface = &mut arenas.interfaces[iface_idx];
-                if iface.config.csnp_disable {
-                    iface.csnp_interval_stop();
-                } else {
-                    iface.csnp_interval_start(&instance);
-                }
-            }
-            Event::InterfaceBfdChange(iface_idx) => {
-                let Some((instance, arenas)) = self.as_up() else {
-                    return;
-                };
-                let iface = &mut arenas.interfaces[iface_idx];
-                iface.with_adjacencies(&mut arenas.adjacencies, |iface, adj| {
-                    if iface.config.bfd_enabled {
-                        adj.bfd_update_sessions(iface, &instance, true);
-                    } else {
-                        adj.bfd_clear_sessions(&instance);
-                    }
-                });
-            }
-            Event::InterfaceUpdateTraceOptions(iface_idx) => {
-                let iface = &mut self.arenas.interfaces[iface_idx];
-                iface.config.update_trace_options(&self.config);
-            }
-            Event::InterfaceIbusSub(iface_idx) => {
-                let iface = &self.arenas.interfaces[iface_idx];
-                self.tx.ibus.interface_sub(Some(iface.name.clone()), None);
-            }
-            Event::ReoriginateLsps(level) => {
-                if let Some((mut instance, _)) = self.as_up() {
-                    instance.schedule_lsp_origination(level);
-                }
-            }
-            Event::RefreshLsps => {
-                if let Some((instance, arenas)) = self.as_up() {
-                    let system_id = instance.config.system_id.unwrap();
-                    for level in [LevelNumber::L1, LevelNumber::L2] {
-                        for lse in instance.state.lsdb.get(level).iter_for_system_id(&arenas.lsp_entries, system_id).filter(|lse| lse.data.rem_lifetime != 0) {
-                            instance.tx.protocol_input.lsp_refresh(level, lse.id);
-                        }
-                    }
-                }
-            }
-            Event::RerunSpf => {
-                if let Some((instance, _)) = self.as_up() {
-                    for level in instance.config.levels() {
-                        instance.tx.protocol_input.spf_delay_event(level, spf::fsm::Event::ConfigChange);
-                    }
-                }
-            }
-            Event::ReinstallRoutes => {
-                if let Some((instance, arenas)) = self.as_up() {
-                    for (prefix, route) in instance.state.rib(instance.config.level_type).iter().filter(|(_, route)| route.flags.contains(RouteFlags::INSTALLED)) {
-                        let distance = route.distance(instance.config);
-                        ibus::tx::route_install(&instance.tx.ibus, prefix, route, None, distance, &arenas.interfaces);
-                    }
-                }
-            }
-            Event::OverloadChange(overload_status) => {
-                if let Some((instance, _)) = self.as_up() {
-                    // Update system counters.
-                    if overload_status {
-                        instance.state.counters.l1.database_overload += 1;
-                        instance.state.counters.l2.database_overload += 1;
-                    }
-
-                    // Send YANG notification.
-                    notification::database_overload(&instance, overload_status);
-                }
-            }
-            Event::SrEnabledChange(enabled) => {
-                let Some((instance, arenas)) = self.as_up() else {
-                    return;
-                };
-
-                // Iterate over all existing adjacencies.
-                for iface in arenas.interfaces.iter_mut() {
-                    iface.with_adjacencies(&mut arenas.adjacencies, |iface, adj| {
-                        if enabled {
-                            sr::adj_sids_add(&instance, iface, adj);
-                        } else {
-                            sr::adj_sids_del(&instance, adj);
-                        }
-                    });
-                }
-            }
-            Event::RedistributeAdd(af, protocol) => {
-                // Subscribe to route redistribution for the given protocol and
-                // address family.
-                self.tx.ibus.route_redistribute_sub(protocol, Some(af));
-            }
-            Event::RedistributeDelete(af, level, protocol) => {
-                // Unsubscribe from route redistribution for the given protocol
-                // and address family.
-                self.tx.ibus.route_redistribute_unsub(protocol, Some(af));
-
-                // Remove redistributed routes.
-                let routes = self.system.routes.get_mut(level);
-                routes.retain(|prefix, route| prefix.address_family() != af || route.protocol != protocol);
-
-                // Schedule LSP reorigination.
-                if let Some((mut instance, _)) = self.as_up() {
-                    instance.schedule_lsp_origination(level);
-                }
-            }
-            Event::UpdateTraceOptions => {
-                for iface in self.arenas.interfaces.iter_mut() {
-                    iface.config.update_trace_options(&self.config);
-                }
-            }
-        }
+        process_event(self, event);
     }
 }
 

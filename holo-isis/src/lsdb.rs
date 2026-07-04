@@ -113,7 +113,7 @@ pub struct LspLogId {
     pub seqno: u32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum LspLogReason {
     Refresh,
     ContentChange,

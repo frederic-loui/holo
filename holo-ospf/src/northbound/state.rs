@@ -87,13 +87,13 @@ impl<'a, V: Version> YangContainer<'a, Instance<V>> for ospf::Ospf {
     }
 }
 
-impl<'a, V: Version> YangContainer<'a, Instance<V>> for ospf::spf_control::ietf_spf_delay::IetfSpfDelay<'a> {
+impl<'a, V: Version> YangContainer<'a, Instance<V>> for ospf::spf_control::ietf_spf_delay::IetfSpfDelay {
     type ParentListEntry = ();
 
     fn new(instance: &'a Instance<V>, _: &Self::ParentListEntry) -> Option<Self> {
         let state = instance.state.as_ref()?;
         Some(Self {
-            current_state: Some(state.spf_delay_state.to_yang()),
+            current_state: Some(state.spf_delay_state),
             remaining_time_to_learn: state.spf_learn_timer.as_ref().map(|task| TimerValueMillis(task.remaining())).ignore_in_testing(),
             remaining_hold_down: state.spf_hold_down_timer.as_ref().map(|task| TimerValueMillis(task.remaining())).ignore_in_testing(),
             last_event_received: state.spf_last_event_rcvd.as_ref().map(|t| Timeticks(*t)).ignore_in_testing(),
@@ -212,7 +212,7 @@ impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::database::as_scope_lsa_
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv2::header::Header<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv2::header::Header {
     type ParentListEntry = &'a LsaEntry<Ospfv2>;
 
     fn new(_instance: &'a Instance<Ospfv2>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -223,7 +223,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_ty
             opaque_type,
             opaque_id,
             age: Some(lsa.age()).ignore_in_testing(),
-            r#type: Some(lsa.hdr.lsa_type.to_yang()),
+            r#type: Some(lsa.hdr.lsa_type),
             adv_router: Some(lsa.hdr.adv_rtr),
             seq_num: Some(lsa.hdr.seq_no).ignore_in_testing(),
             checksum: Some(FletcherChecksum16(lsa.hdr.cksum)).ignore_in_testing(),
@@ -255,7 +255,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_ty
     }
 }
 
-impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv2::body::external::topologies::topology::Topology<'a> {
+impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv2::body::external::topologies::topology::Topology {
     type ParentListEntry = &'a LsaEntry<Ospfv2>;
     type ListEntry = &'a LsaEntry<Ospfv2>;
 
@@ -271,7 +271,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::a
         let lsa_body = lsa.body.as_as_external().unwrap();
         Self {
             mt_id: Some(0),
-            flags: Some(lsa_body.flags.to_yang()),
+            flags: Some(lsa_body.flags),
             metric: Some(lsa_body.metric),
             forwarding_address: lsa_body.fwd_addr,
             external_route_tag: Some(lsa_body.tag),
@@ -388,7 +388,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_ty
     fn new(_instance: &'a Instance<Ospfv2>, lse: &Self::ParentListEntry) -> Option<Self> {
         let lsa = &lse.data;
         let lsa_body = lsa.body.as_opaque_link()?.as_router_info()?;
-        let iter = lsa_body.sr_algo.iter().flat_map(|tlv| tlv.get().iter()).map(|algo| algo.to_yang());
+        let iter = lsa_body.sr_algo.iter().flat_map(|tlv| tlv.get().iter()).copied();
         Some(Self {
             sr_algorithm: Some(Box::new(iter)),
         })
@@ -447,7 +447,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_ty
     }
 }
 
-impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv2::body::opaque::extended_prefix_opaque::extended_prefix_tlv::ExtendedPrefixTlv<'a> {
+impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv2::body::opaque::extended_prefix_opaque::extended_prefix_tlv::ExtendedPrefixTlv {
     type ParentListEntry = &'a LsaEntry<Ospfv2>;
     type ListEntry = &'a ospfv2::packet::lsa_opaque::ExtPrefixTlv;
 
@@ -460,7 +460,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::a
 
     fn new(_instance: &'a Instance<Ospfv2>, tlv: &Self::ListEntry) -> Self {
         Self {
-            route_type: Some(tlv.route_type.to_yang()),
+            route_type: Some(tlv.route_type),
             prefix: Some(tlv.prefix.into()),
         }
     }
@@ -494,7 +494,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::a
     }
 }
 
-impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv2::body::opaque::extended_prefix_opaque::extended_prefix_tlv::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a> {
+impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv2::body::opaque::extended_prefix_opaque::extended_prefix_tlv::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv {
     type ParentListEntry = &'a ospfv2::packet::lsa_opaque::ExtPrefixTlv;
     type ListEntry = &'a ospfv2::packet::lsa_opaque::PrefixSid;
 
@@ -506,7 +506,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::database::as_scope_lsa_type::a
     fn new(_instance: &'a Instance<Ospfv2>, stlv: &Self::ListEntry) -> Self {
         Self {
             mt_id: Some(0),
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -525,7 +525,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>>
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv3::header::Header<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv3::header::Header {
     type ParentListEntry = &'a LsaEntry<Ospfv3>;
 
     fn new(_instance: &'a Instance<Ospfv3>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -533,7 +533,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_ty
         Some(Self {
             lsa_id: Some(lsa.hdr.lsa_id.into()),
             age: Some(lsa.age()).ignore_in_testing(),
-            r#type: Some(lsa.hdr.lsa_type.to_yang()),
+            r#type: Some(lsa.hdr.lsa_type),
             adv_router: Some(lsa.hdr.adv_rtr),
             seq_num: Some(lsa.hdr.seq_no).ignore_in_testing(),
             checksum: Some(FletcherChecksum16(lsa.hdr.cksum)).ignore_in_testing(),
@@ -543,7 +543,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_ty
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv3::body::as_external::AsExternal<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv3::body::as_external::AsExternal {
     type ParentListEntry = &'a LsaEntry<Ospfv3>;
 
     fn new(_instance: &'a Instance<Ospfv3>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -551,8 +551,8 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_ty
         let lsa_body = lsa.body.as_std_as_external()?;
         Some(Self {
             metric: Some(lsa_body.metric),
-            flags: Some(lsa_body.flags.to_yang()),
-            referenced_ls_type: lsa_body.ref_lsa_type.map(|lsa_type| lsa_type.to_yang()),
+            flags: Some(lsa_body.flags),
+            referenced_ls_type: lsa_body.ref_lsa_type,
             unknown_referenced_ls_type: lsa_body.ref_lsa_type.and_then(|ref_lsa_type| if ref_lsa_type.function_code().is_none() { Some(ref_lsa_type.0) } else { None }),
             prefix: Some(lsa_body.prefix),
             forwarding_address: lsa_body.fwd_addr.map(|addr| match addr {
@@ -647,7 +647,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_ty
     fn new(_instance: &'a Instance<Ospfv3>, lse: &Self::ParentListEntry) -> Option<Self> {
         let lsa = &lse.data;
         let lsa_body = lsa.body.as_router_info()?;
-        let iter = lsa_body.sr_algo.iter().flat_map(|tlv| tlv.get().iter()).map(|algo| algo.to_yang());
+        let iter = lsa_body.sr_algo.iter().flat_map(|tlv| tlv.get().iter()).copied();
         Some(Self {
             sr_algorithm: Some(Box::new(iter)),
         })
@@ -827,7 +827,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::database::as_scope_lsa_ty
 }
 
 impl<'a> YangList<'a, Instance<Ospfv3>>
-    for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv3::body::e_as_external::e_external_tlvs::external_prefix_tlv::sub_tlvs::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a>
+    for ospf::database::as_scope_lsa_type::as_scope_lsas::as_scope_lsa::ospfv3::body::e_as_external::e_external_tlvs::external_prefix_tlv::sub_tlvs::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv
 {
     type ParentListEntry = Ospfv3PrefixSubTlv<'a>;
     type ListEntry = &'a ospfv3::packet::lsa::PrefixSid;
@@ -842,7 +842,7 @@ impl<'a> YangList<'a, Instance<Ospfv3>>
 
     fn new(_instance: &'a Instance<Ospfv3>, stlv: &Self::ListEntry) -> Self {
         Self {
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -861,7 +861,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>>
     }
 }
 
-impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::spf_log::event::Event<'a> {
+impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::spf_log::event::Event {
     type ParentListEntry = ();
     type ListEntry = &'a SpfLogEntry<V>;
 
@@ -874,7 +874,7 @@ impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::spf_log::event::Event<'
     fn new(_instance: &'a Instance<V>, log: &Self::ListEntry) -> Self {
         Self {
             id: log.id,
-            spf_type: Some(log.spf_type.to_yang()),
+            spf_type: Some(log.spf_type),
             schedule_timestamp: Some(Timeticks(log.schedule_time)),
             start_timestamp: Some(Timeticks(log.start_time)),
             end_timestamp: Some(Timeticks(log.end_time)),
@@ -902,7 +902,7 @@ impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::spf_log::event::trigger
     }
 }
 
-impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::lsa_log::event::Event<'a> {
+impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::lsa_log::event::Event {
     type ParentListEntry = ();
     type ListEntry = &'a LsaLogEntry<V>;
 
@@ -916,7 +916,7 @@ impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::lsa_log::event::Event<'
         Self {
             id: log.id,
             received_timestamp: log.rcvd_time.as_ref().map(|t| Timeticks(*t)).ignore_in_testing(),
-            reason: Some(log.reason.to_yang()),
+            reason: Some(log.reason),
         }
     }
 }
@@ -1020,7 +1020,7 @@ impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::areas::area::database::
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv2::header::Header<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv2::header::Header {
     type ParentListEntry = &'a LsaEntry<Ospfv2>;
 
     fn new(_instance: &'a Instance<Ospfv2>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -1031,7 +1031,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::database::ar
             opaque_type,
             opaque_id,
             age: Some(lsa.age()).ignore_in_testing(),
-            r#type: Some(lsa.hdr.lsa_type.to_yang()),
+            r#type: Some(lsa.hdr.lsa_type),
             adv_router: Some(lsa.hdr.adv_rtr),
             seq_num: Some(lsa.hdr.seq_no).ignore_in_testing(),
             checksum: Some(FletcherChecksum16(lsa.hdr.cksum)).ignore_in_testing(),
@@ -1091,7 +1091,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::areas::area::database::area_sc
         Self {
             link_id: Some(rtr_link.link_id.to_string().into()),
             link_data: Some(rtr_link.link_data.to_string().into()),
-            r#type: Some(rtr_link.link_type.to_yang()),
+            r#type: Some(rtr_link.link_type),
         }
     }
 }
@@ -1314,7 +1314,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::database::ar
     fn new(_instance: &'a Instance<Ospfv2>, lse: &Self::ParentListEntry) -> Option<Self> {
         let lsa = &lse.data;
         let lsa_body = lsa.body.as_opaque_area()?.as_router_info()?;
-        let iter = lsa_body.sr_algo.iter().flat_map(|tlv| tlv.get().iter()).map(|algo| algo.to_yang());
+        let iter = lsa_body.sr_algo.iter().flat_map(|tlv| tlv.get().iter()).copied();
         Some(Self {
             sr_algorithm: Some(Box::new(iter)),
         })
@@ -1373,7 +1373,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::database::ar
     }
 }
 
-impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv2::body::opaque::extended_prefix_opaque::extended_prefix_tlv::ExtendedPrefixTlv<'a> {
+impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv2::body::opaque::extended_prefix_opaque::extended_prefix_tlv::ExtendedPrefixTlv {
     type ParentListEntry = &'a LsaEntry<Ospfv2>;
     type ListEntry = &'a ospfv2::packet::lsa_opaque::ExtPrefixTlv;
 
@@ -1386,7 +1386,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::areas::area::database::area_sc
 
     fn new(_instance: &'a Instance<Ospfv2>, tlv: &Self::ListEntry) -> Self {
         Self {
-            route_type: Some(tlv.route_type.to_yang()),
+            route_type: Some(tlv.route_type),
             prefix: Some(tlv.prefix.into()),
         }
     }
@@ -1421,7 +1421,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::areas::area::database::area_sc
 }
 
 impl<'a> YangList<'a, Instance<Ospfv2>>
-    for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv2::body::opaque::extended_prefix_opaque::extended_prefix_tlv::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a>
+    for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv2::body::opaque::extended_prefix_opaque::extended_prefix_tlv::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv
 {
     type ParentListEntry = &'a ospfv2::packet::lsa_opaque::ExtPrefixTlv;
     type ListEntry = &'a ospfv2::packet::lsa_opaque::PrefixSid;
@@ -1434,7 +1434,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>>
     fn new(_instance: &'a Instance<Ospfv2>, stlv: &Self::ListEntry) -> Self {
         Self {
             mt_id: Some(0),
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -1462,7 +1462,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::database::ar
         Some(Self {
             link_id: Some(tlv.link_id.to_string().into()),
             link_data: Some(tlv.link_data.to_string().into()),
-            r#type: Some(tlv.link_type.to_yang()),
+            r#type: Some(tlv.link_type),
         })
     }
 }
@@ -1575,7 +1575,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>>
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::header::Header<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::header::Header {
     type ParentListEntry = &'a LsaEntry<Ospfv3>;
 
     fn new(_instance: &'a Instance<Ospfv3>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -1583,7 +1583,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::ar
         Some(Self {
             lsa_id: Some(lsa.hdr.lsa_id.into()),
             age: Some(lsa.age()).ignore_in_testing(),
-            r#type: Some(lsa.hdr.lsa_type.to_yang()),
+            r#type: Some(lsa.hdr.lsa_type),
             adv_router: Some(lsa.hdr.adv_rtr),
             seq_num: Some(lsa.hdr.seq_no).ignore_in_testing(),
             checksum: Some(FletcherChecksum16(lsa.hdr.cksum)).ignore_in_testing(),
@@ -1617,7 +1617,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::ar
     }
 }
 
-impl<'a> YangList<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::router::links::link::Link<'a> {
+impl<'a> YangList<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::router::links::link::Link {
     type ParentListEntry = &'a LsaEntry<Ospfv3>;
     type ListEntry = &'a ospfv3::packet::lsa::LsaRouterLink;
 
@@ -1633,7 +1633,7 @@ impl<'a> YangList<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_sc
             interface_id: Some(rtr_link.iface_id),
             neighbor_interface_id: Some(rtr_link.nbr_iface_id),
             neighbor_router_id: Some(rtr_link.nbr_router_id),
-            r#type: Some(rtr_link.link_type.to_yang()),
+            r#type: Some(rtr_link.link_type),
             metric: Some(rtr_link.metric),
         }
     }
@@ -1714,14 +1714,14 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::ar
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::intra_area_prefix::IntraAreaPrefix<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::intra_area_prefix::IntraAreaPrefix {
     type ParentListEntry = &'a LsaEntry<Ospfv3>;
 
     fn new(_instance: &'a Instance<Ospfv3>, lse: &Self::ParentListEntry) -> Option<Self> {
         let lsa = &lse.data;
         let lsa_body = lsa.body.as_std_intra_area_prefix()?;
         Some(Self {
-            referenced_ls_type: Some(lsa_body.ref_lsa_type.to_yang()),
+            referenced_ls_type: Some(lsa_body.ref_lsa_type),
             unknown_referenced_ls_type: if lsa_body.ref_lsa_type.function_code().is_none() { Some(lsa_body.ref_lsa_type.0) } else { None },
             referenced_link_state_id: Some(lsa_body.ref_lsa_id.into()),
             referenced_adv_router: Some(lsa_body.ref_adv_rtr),
@@ -1863,7 +1863,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::ar
     fn new(_instance: &'a Instance<Ospfv3>, lse: &Self::ParentListEntry) -> Option<Self> {
         let lsa = &lse.data;
         let lsa_body = lsa.body.as_router_info()?;
-        let iter = lsa_body.sr_algo.iter().flat_map(|tlv| tlv.get().iter()).map(|algo| algo.to_yang());
+        let iter = lsa_body.sr_algo.iter().flat_map(|tlv| tlv.get().iter()).copied();
         Some(Self {
             sr_algorithm: Some(Box::new(iter)),
         })
@@ -1971,7 +1971,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::ar
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::e_router::e_router_tlvs::link_tlv::LinkTlv<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::e_router::e_router_tlvs::link_tlv::LinkTlv {
     type ParentListEntry = &'a ospfv3::packet::lsa::LsaRouterLink;
 
     fn new(_instance: &'a Instance<Ospfv3>, rtr_link: &Self::ParentListEntry) -> Option<Self> {
@@ -1979,7 +1979,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::database::ar
             interface_id: Some(rtr_link.iface_id),
             neighbor_interface_id: Some(rtr_link.nbr_iface_id),
             neighbor_router_id: Some(rtr_link.nbr_router_id),
-            r#type: Some(rtr_link.link_type.to_yang()),
+            r#type: Some(rtr_link.link_type),
             metric: Some(rtr_link.metric),
         })
     }
@@ -2217,7 +2217,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>>
 }
 
 impl<'a> YangList<'a, Instance<Ospfv3>>
-    for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::e_inter_area_prefix::e_inter_prefix_tlvs::inter_prefix_tlv::sub_tlvs::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a>
+    for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::e_inter_area_prefix::e_inter_prefix_tlvs::inter_prefix_tlv::sub_tlvs::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv
 {
     type ParentListEntry = Ospfv3PrefixSubTlv<'a>;
     type ListEntry = &'a ospfv3::packet::lsa::PrefixSid;
@@ -2232,7 +2232,7 @@ impl<'a> YangList<'a, Instance<Ospfv3>>
 
     fn new(_instance: &'a Instance<Ospfv3>, stlv: &Self::ListEntry) -> Self {
         Self {
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -2511,7 +2511,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>>
 }
 
 impl<'a> YangList<'a, Instance<Ospfv3>>
-    for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::e_intra_area_prefix::e_intra_prefix_tlvs::intra_prefix_tlv::sub_tlvs::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a>
+    for ospf::areas::area::database::area_scope_lsa_type::area_scope_lsas::area_scope_lsa::ospfv3::body::e_intra_area_prefix::e_intra_prefix_tlvs::intra_prefix_tlv::sub_tlvs::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv
 {
     type ParentListEntry = Ospfv3PrefixSubTlv<'a>;
     type ListEntry = &'a ospfv3::packet::lsa::PrefixSid;
@@ -2526,7 +2526,7 @@ impl<'a> YangList<'a, Instance<Ospfv3>>
 
     fn new(_instance: &'a Instance<Ospfv3>, stlv: &Self::ListEntry) -> Self {
         Self {
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }
@@ -2674,7 +2674,7 @@ impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::areas::area::virtual_li
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::virtual_links::virtual_link::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv2::header::Header<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::virtual_links::virtual_link::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv2::header::Header {
     type ParentListEntry = &'a LsaEntry<Ospfv2>;
 
     fn new(_instance: &'a Instance<Ospfv2>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -2685,7 +2685,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::virtual_link
             opaque_type,
             opaque_id,
             age: Some(lsa.age()).ignore_in_testing(),
-            r#type: Some(lsa.hdr.lsa_type.to_yang()),
+            r#type: Some(lsa.hdr.lsa_type),
             adv_router: Some(lsa.hdr.adv_rtr),
             seq_num: Some(lsa.hdr.seq_no).ignore_in_testing(),
             checksum: Some(FletcherChecksum16(lsa.hdr.cksum)).ignore_in_testing(),
@@ -2801,7 +2801,7 @@ impl<'a> YangList<'a, Instance<Ospfv2>> for ospf::areas::area::virtual_links::vi
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::virtual_links::virtual_link::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv3::header::Header<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::virtual_links::virtual_link::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv3::header::Header {
     type ParentListEntry = &'a LsaEntry<Ospfv3>;
 
     fn new(_instance: &'a Instance<Ospfv3>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -2809,7 +2809,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::virtual_link
         Some(Self {
             lsa_id: Some(lsa.hdr.lsa_id.into()),
             age: Some(lsa.age()).ignore_in_testing(),
-            r#type: Some(lsa.hdr.lsa_type.to_yang()),
+            r#type: Some(lsa.hdr.lsa_type),
             adv_router: Some(lsa.hdr.adv_rtr),
             seq_num: Some(lsa.hdr.seq_no).ignore_in_testing(),
             checksum: Some(FletcherChecksum16(lsa.hdr.cksum)).ignore_in_testing(),
@@ -3069,7 +3069,7 @@ impl<'a, V: Version> YangList<'a, Instance<V>> for ospf::areas::area::interfaces
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::interfaces::interface::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv2::header::Header<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::interfaces::interface::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv2::header::Header {
     type ParentListEntry = &'a LsaEntry<Ospfv2>;
 
     fn new(_instance: &'a Instance<Ospfv2>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -3080,7 +3080,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::interfaces::
             opaque_type,
             opaque_id,
             age: Some(lsa.age()).ignore_in_testing(),
-            r#type: Some(lsa.hdr.lsa_type.to_yang()),
+            r#type: Some(lsa.hdr.lsa_type),
             adv_router: Some(lsa.hdr.adv_rtr),
             seq_num: Some(lsa.hdr.seq_no).ignore_in_testing(),
             checksum: Some(FletcherChecksum16(lsa.hdr.cksum)).ignore_in_testing(),
@@ -3212,7 +3212,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv2>> for ospf::areas::area::interfaces::
     }
 }
 
-impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::interfaces::interface::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv3::header::Header<'a> {
+impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::interfaces::interface::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv3::header::Header {
     type ParentListEntry = &'a LsaEntry<Ospfv3>;
 
     fn new(_instance: &'a Instance<Ospfv3>, lse: &Self::ParentListEntry) -> Option<Self> {
@@ -3220,7 +3220,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>> for ospf::areas::area::interfaces::
         Some(Self {
             lsa_id: Some(lsa.hdr.lsa_id.into()),
             age: Some(lsa.age()).ignore_in_testing(),
-            r#type: Some(lsa.hdr.lsa_type.to_yang()),
+            r#type: Some(lsa.hdr.lsa_type),
             adv_router: Some(lsa.hdr.adv_rtr),
             seq_num: Some(lsa.hdr.seq_no).ignore_in_testing(),
             checksum: Some(FletcherChecksum16(lsa.hdr.cksum)).ignore_in_testing(),
@@ -3469,7 +3469,7 @@ impl<'a> YangContainer<'a, Instance<Ospfv3>>
 }
 
 impl<'a> YangList<'a, Instance<Ospfv3>>
-    for ospf::areas::area::interfaces::interface::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv3::body::e_link::e_link_tlvs::intra_prefix_tlv::sub_tlvs::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv<'a>
+    for ospf::areas::area::interfaces::interface::database::link_scope_lsa_type::link_scope_lsas::link_scope_lsa::ospfv3::body::e_link::e_link_tlvs::intra_prefix_tlv::sub_tlvs::prefix_sid_sub_tlvs::prefix_sid_sub_tlv::PrefixSidSubTlv
 {
     type ParentListEntry = &'a UnknownTlv;
     type ListEntry = &'a ospfv3::packet::lsa::PrefixSid;
@@ -3480,7 +3480,7 @@ impl<'a> YangList<'a, Instance<Ospfv3>>
 
     fn new(_instance: &'a Instance<Ospfv3>, stlv: &Self::ListEntry) -> Self {
         Self {
-            algorithm: Some(stlv.algo.to_yang()),
+            algorithm: Some(stlv.algo),
             label_value: stlv.sid.as_label().map(|label| label.get()),
             index_value: stlv.sid.as_index().copied(),
         }

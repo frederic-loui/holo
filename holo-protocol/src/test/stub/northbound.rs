@@ -83,7 +83,7 @@ impl NorthboundStub {
         // Get data diff.
         let data_diff = self
             .running_config
-            .diff(&candidate, DataDiffFlags::empty())
+            .diff(&candidate, DataDiffFlags::DEFAULTS)
             .expect("Failed to compare data trees");
 
         self.commit(candidate, data_diff).await;

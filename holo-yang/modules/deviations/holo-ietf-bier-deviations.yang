@@ -87,7 +87,9 @@ module holo-ietf-bier-deviations {
 
   deviation "/rt:routing/bier:bier/bier:sub-domain/bier:mt-id" {
     deviate replace {
-      type uint8;
+      type uint8 {
+        range "0..128";
+      }
     }
     deviate add {
       default "0";

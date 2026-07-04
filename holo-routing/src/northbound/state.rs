@@ -16,7 +16,6 @@ use holo_utils::ip::JointPrefixMapExt;
 use holo_utils::mpls::Label;
 use holo_utils::protocol::Protocol;
 use holo_utils::southbound::{Nexthop, RouteKind};
-use holo_yang::ToYang;
 use ipnetwork::{Ipv4Network, Ipv6Network};
 
 use crate::northbound::configuration::NexthopSpecial;
@@ -68,7 +67,7 @@ impl<'a> YangList<'a, Master> for routing::control_plane_protocols::control_plan
 
     fn new(_master: &'a Master, instance: &Self::ListEntry) -> Self {
         Self {
-            r#type: instance.id.protocol.to_yang(),
+            r#type: instance.id.protocol,
             name: Cow::Borrowed(&instance.id.name),
         }
     }
@@ -147,21 +146,21 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::Route<'a> {
         // TODO: multiple unimplemented fields.
         Self {
             route_preference: (!dest.is_label()).then_some(route.distance),
-            source_protocol: (!dest.is_label()).then_some(route.protocol.to_yang()),
+            source_protocol: (!dest.is_label()).then_some(route.protocol),
             active: route.flags.contains(RouteFlags::ACTIVE).then_some(()),
             last_updated: Some(route.last_updated),
             v4ur_destination_prefix: dest.as_ipv4().copied(),
             v6ur_destination_prefix: dest.as_ipv6().copied(),
             mpls_enabled: None,
             mpls_local_label: None,
-            mpls_destination_prefix: dest.as_label().map(|label| label.to_yang()),
+            mpls_destination_prefix: dest.as_label().copied(),
             route_context: None,
             ospf_metric: matches!(route.protocol, Protocol::OSPFV2 | Protocol::OSPFV3).then_some(route.metric),
             ospf_tag: if matches!(route.protocol, Protocol::OSPFV2 | Protocol::OSPFV3) { route.tag } else { None },
-            ospf_route_type: route.opaque_attrs.as_ospf().map(|route_type| route_type.to_yang()),
+            ospf_route_type: route.opaque_attrs.as_ospf().copied(),
             isis_metric: (route.protocol == Protocol::ISIS).then_some(route.metric),
             isis_tag: None,
-            isis_route_type: route.opaque_attrs.as_isis().map(|route_type| route_type.to_yang()),
+            isis_route_type: route.opaque_attrs.as_isis().copied(),
         }
     }
 }
@@ -207,9 +206,9 @@ impl<'a> YangContainer<'a, Master> for routing::ribs::rib::routes::route::next_h
                     },
                 }
             }
-            RouteKind::Blackhole => special_next_hop = Some(NexthopSpecial::Blackhole.to_yang()),
-            RouteKind::Unreachable => special_next_hop = Some(NexthopSpecial::Unreachable.to_yang()),
-            RouteKind::Prohibit => special_next_hop = Some(NexthopSpecial::Prohibit.to_yang()),
+            RouteKind::Blackhole => special_next_hop = Some(NexthopSpecial::Blackhole),
+            RouteKind::Unreachable => special_next_hop = Some(NexthopSpecial::Unreachable),
+            RouteKind::Prohibit => special_next_hop = Some(NexthopSpecial::Prohibit),
             _ => (),
         }
 
@@ -222,7 +221,7 @@ impl<'a> YangContainer<'a, Master> for routing::ribs::rib::routes::route::next_h
     }
 }
 
-impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::next_hop::mpls_label_stack::entry::Entry<'a> {
+impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::next_hop::mpls_label_stack::entry::Entry {
     type ParentListEntry = (RouteDestination, &'a Route);
     type ListEntry = (usize, &'a Label);
 
@@ -244,7 +243,7 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::next_hop::m
     fn new(_master: &'a Master, (id, label): &Self::ListEntry) -> Self {
         Self {
             id: *id as u8,
-            label: Some(label.to_yang()),
+            label: Some(**label),
         }
     }
 }
@@ -294,7 +293,7 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::next_hop::n
     }
 }
 
-impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::next_hop::next_hop_list::next_hop::mpls_label_stack::entry::Entry<'a> {
+impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::next_hop::next_hop_list::next_hop::mpls_label_stack::entry::Entry {
     type ParentListEntry = &'a Nexthop;
     type ListEntry = (usize, &'a Label);
 
@@ -313,7 +312,7 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::next_hop::n
     fn new(_master: &'a Master, (id, label): &Self::ListEntry) -> Self {
         Self {
             id: *id as u8,
-            label: Some(label.to_yang()),
+            label: Some(**label),
         }
     }
 }

@@ -27,6 +27,22 @@ module holo-ietf-ospf-sr-mpls-deviations {
      module.";
 
   /*
+   * Added constraints
+   */
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/ospf:ospf/ospf-sr-mpls:segment-routing/ospf-sr-mpls:enabled" {
+    deviate add {
+      must 'not(. = "true") or '
+         + 'not(derived-from-or-self(../../../rt:type, "ospf:ospfv3")) or '
+         + '../../ospfv3-e-lsa:extended-lsa-support = "true"' {
+        error-message
+          "Segment Routing for OSPFv3 requires extended LSA support "
+        + "to be enabled.";
+      }
+    }
+  }
+
+  /*
    * Not supported nodes
    */
 

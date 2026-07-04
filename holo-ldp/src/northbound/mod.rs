@@ -14,14 +14,20 @@ pub mod yang;
 #[allow(unused_imports, unused_variables)]
 #[allow(clippy::module_inception)]
 pub mod yang_gen {
+    use holo_utils::mpls::Label;
     pub use routing::control_plane_protocols::control_plane_protocol::mpls_ldp;
 
-    use crate::neighbor::LabelAdvMode;
+    use crate::neighbor;
+    use crate::neighbor::{LabelAdvMode, LabelDistMode};
     use crate::northbound::state::AdvertisementType;
     include!(concat!(env!("OUT_DIR"), "/yang_objects.rs"));
     pub mod ops {
         use crate::instance::Instance;
         type Provider = Instance;
         include!(concat!(env!("OUT_DIR"), "/yang_ops.rs"));
+    }
+    pub mod config {
+        use super::*;
+        include!(concat!(env!("OUT_DIR"), "/yang_config.rs"));
     }
 }

@@ -11,7 +11,6 @@ use std::sync::atomic::Ordering;
 
 use holo_northbound::state::{ListIterator, Provider, YangContainer, YangList, YangOps};
 use holo_utils::option::OptionExt;
-use holo_yang::ToYang;
 
 use crate::instance::Instance;
 use crate::interface::Interface;
@@ -28,7 +27,7 @@ impl Provider for Interface {
 
 // ===== YANG impls =====
 
-impl<'a> YangList<'a, Interface> for interfaces::interface::ipv4::vrrp::vrrp_instance::VrrpInstance<'a> {
+impl<'a> YangList<'a, Interface> for interfaces::interface::ipv4::vrrp::vrrp_instance::VrrpInstance {
     type ParentListEntry = ();
     type ListEntry = (u8, &'a Instance);
 
@@ -40,13 +39,13 @@ impl<'a> YangList<'a, Interface> for interfaces::interface::ipv4::vrrp::vrrp_ins
     fn new(_interface: &'a Interface, (vrid, instance): &Self::ListEntry) -> Self {
         Self {
             vrid: *vrid,
-            state: Some(instance.state.state.to_yang()), // TODO
+            state: Some(instance.state.state),
             is_owner: None,
             last_adv_source: instance.state.last_adv_src.ignore_in_testing(),
             up_datetime: instance.state.up_time.ignore_in_testing(),
             master_down_interval: instance.state.timer.as_master_down_timer().map(|task| task.remaining().as_millis() as u32 / 10).ignore_in_testing(),
             skew_time: None, // TODO
-            last_event: Some(instance.state.last_event.to_yang()).ignore_in_testing(),
+            last_event: Some(instance.state.last_event).ignore_in_testing(),
             new_master_reason: Some(instance.state.new_master_reason),
         }
     }
@@ -72,7 +71,7 @@ impl<'a> YangContainer<'a, Interface> for interfaces::interface::ipv4::vrrp::vrr
     }
 }
 
-impl<'a> YangList<'a, Interface> for interfaces::interface::ipv6::vrrp::vrrp_instance::VrrpInstance<'a> {
+impl<'a> YangList<'a, Interface> for interfaces::interface::ipv6::vrrp::vrrp_instance::VrrpInstance {
     type ParentListEntry = ();
     type ListEntry = (u8, &'a Instance);
 
@@ -84,13 +83,13 @@ impl<'a> YangList<'a, Interface> for interfaces::interface::ipv6::vrrp::vrrp_ins
     fn new(_interface: &'a Interface, (vrid, instance): &Self::ListEntry) -> Self {
         Self {
             vrid: *vrid,
-            state: Some(instance.state.state.to_yang()),
+            state: Some(instance.state.state),
             is_owner: None, // TODO
             last_adv_source: instance.state.last_adv_src.ignore_in_testing(),
             up_datetime: instance.state.up_time.ignore_in_testing(),
             master_down_interval: instance.state.timer.as_master_down_timer().map(|task| task.remaining().as_millis() as u32 / 10).ignore_in_testing(),
             skew_time: None, // TODO
-            last_event: Some(instance.state.last_event.to_yang()).ignore_in_testing(),
+            last_event: Some(instance.state.last_event).ignore_in_testing(),
             new_master_reason: Some(instance.state.new_master_reason),
         }
     }

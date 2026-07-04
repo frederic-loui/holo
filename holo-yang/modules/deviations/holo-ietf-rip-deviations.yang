@@ -11,6 +11,10 @@ module holo-ietf-rip-deviations {
     prefix rip;
   }
 
+  import ietf-key-chain {
+    prefix key-chain;
+  }
+
   organization
     "Holo Routing Stack";
 
@@ -20,6 +24,19 @@ module holo-ietf-rip-deviations {
 
   deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/rip:rip/rip:originate-default-route" {
     deviate not-supported;
+  }
+
+  /*
+   * Added constraints
+   */
+
+  deviation "/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol/rip:rip/rip:interfaces/rip:interface/rip:authentication/rip:auth-type-selection/rip:auth-key/rip:crypto-algorithm" {
+    deviate add {
+      must 'derived-from-or-self(., "key-chain:md5")' {
+        error-message
+          "Unsupported cryptographic algorithm.";
+      }
+    }
   }
 
   /*

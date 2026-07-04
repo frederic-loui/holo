@@ -4,32 +4,28 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::HashSet;
-use std::sync::LazyLock as Lazy;
+use std::collections::{BTreeSet, HashSet};
+use std::net::IpAddr;
 use std::time::Duration;
 
-use enum_as_inner::EnumAsInner;
-use holo_northbound::configuration::{Callbacks, CallbacksBuilder, Provider, ValidationCallbacks, ValidationCallbacksBuilder};
+use holo_northbound::configuration::{ConfigOp, Provider, YangConfigOps};
+use holo_northbound::error::{ApplyError, ValidationError};
 use holo_utils::crypto::CryptoAlgo;
 use holo_utils::ip::IpAddrKind;
-use holo_utils::yang::DataNodeRefExt;
-use holo_yang::{ToYang, TryFromYang};
+use holo_utils::protocol::Protocol;
+use holo_utils::yang::{DataNodeRefExt, DataTreeExt};
+use holo_yang::TryFromYang;
+use yang5::data::DataTree;
 
 use crate::debug::{Debug, InterfaceInactiveReason};
 use crate::ibus;
 use crate::instance::Instance;
-use crate::interface::{InterfaceIndex, SplitHorizon};
+use crate::interface::{Interface, InterfaceIndex, SplitHorizon};
+use crate::northbound::yang_gen::config::{self, ConfigChange, InterfaceChange, InterfaceEntryChange, InterfaceNeighborChange, TraceOptionsFlagChange, TraceOptionsFlagEntryChange};
 use crate::northbound::yang_gen::rip;
+use crate::northbound::yang_gen::routing::control_plane_protocols::control_plane_protocol;
 use crate::route::{Metric, RouteFlags};
-use crate::version::{Ripng, Ripv2, Version};
-
-#[derive(Debug, EnumAsInner)]
-pub enum ListEntry<V: Version> {
-    None,
-    Interface(InterfaceIndex),
-    StaticNbr(InterfaceIndex, V::IpAddr),
-    TraceOption(TraceOption),
-}
+use crate::version::Version;
 
 #[derive(Debug)]
 pub enum Resource {}
@@ -46,11 +42,6 @@ pub enum Event {
     ReinstallRoutes,
     ResetUpdateInterval,
 }
-
-pub static VALIDATION_CALLBACKS_RIPV2: Lazy<ValidationCallbacks> = Lazy::new(load_validation_callbacks_ripv2);
-pub static VALIDATION_CALLBACKS_RIPNG: Lazy<ValidationCallbacks> = Lazy::new(load_validation_callbacks_ripng);
-pub static CALLBACKS_RIPV2: Lazy<Callbacks<Instance<Ripv2>>> = Lazy::new(load_callbacks_ripv2);
-pub static CALLBACKS_RIPNG: Lazy<Callbacks<Instance<Ripng>>> = Lazy::new(load_callbacks_ripng);
 
 // ===== configuration structs =====
 
@@ -95,296 +86,279 @@ pub struct TraceOptions {
     pub route: bool,
 }
 
-// ===== callbacks =====
+// ===== helper functions =====
 
-fn load_callbacks<V>() -> Callbacks<Instance<V>>
+fn apply_instance<V>(instance: &mut Instance<V>, change: ConfigChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError>
 where
     V: Version,
 {
-    CallbacksBuilder::<Instance<V>>::default()
-        .path(rip::default_metric::PATH)
-        .modify_apply(|instance, args| {
-            let default_metric = args.dnode.get_u8();
-            let default_metric = Metric::from(default_metric);
-            instance.config.default_metric = default_metric;
-        })
-        .path(rip::distance::PATH)
-        .modify_apply(|instance, args| {
-            let distance = args.dnode.get_u8();
+    match change {
+        ConfigChange::DefaultMetric(default_metric) => {
+            instance.config.default_metric = Metric::from(default_metric);
+        }
+        ConfigChange::Distance(distance) => {
             instance.config.distance = distance;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::ReinstallRoutes);
-        })
-        .path(rip::triggered_update_threshold::PATH)
-        .modify_apply(|instance, args| {
-            let threshold = args.dnode.get_u8();
+        }
+        ConfigChange::TriggeredUpdateThreshold(threshold) => {
             instance.config.triggered_update_threshold = threshold;
-        })
-        .path(rip::timers::update_interval::PATH)
-        .modify_apply(|instance, args| {
-            let update_interval = args.dnode.get_u16();
+        }
+        ConfigChange::TimersUpdateInterval(update_interval) => {
             instance.config.update_interval = update_interval;
-
-            let event_queue = args.event_queue;
             event_queue.insert(Event::ResetUpdateInterval);
-        })
-        .path(rip::timers::invalid_interval::PATH)
-        .modify_apply(|instance, args| {
-            let invalid_interval = args.dnode.get_u16();
+        }
+        ConfigChange::TimersInvalidInterval(invalid_interval) => {
             instance.config.invalid_interval = invalid_interval;
-        })
-        .path(rip::timers::flush_interval::PATH)
-        .modify_apply(|instance, args| {
-            let flush_interval = args.dnode.get_u16();
+        }
+        ConfigChange::TimersFlushInterval(flush_interval) => {
             instance.config.flush_interval = flush_interval;
-        })
-        .path(rip::trace_options::flag::PATH)
-        .create_apply(|instance, args| {
-            let trace_opt = args.dnode.get_string_relative("name").unwrap();
-            let trace_opt = TraceOption::try_from_yang(&trace_opt).unwrap();
-            let trace_opts = &mut instance.config.trace_opts;
-            match trace_opt {
-                TraceOption::Events => trace_opts.events = true,
-                TraceOption::InternalBus => trace_opts.ibus = true,
-                TraceOption::Packets => {
-                    trace_opts.packets_tx = true;
-                    trace_opts.packets_rx = true;
-                }
-                TraceOption::Route => trace_opts.route = true,
+        }
+        ConfigChange::TraceOptionsFlag(keys, change) => {
+            apply_trace_options(instance, keys.name, change)?;
+        }
+        ConfigChange::Interface(keys, change) => {
+            apply_interface(instance, keys.interface, change, event_queue)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_trace_options<V>(instance: &mut Instance<V>, trace_opt: TraceOption, change: TraceOptionsFlagChange) -> Result<(), ApplyError>
+where
+    V: Version,
+{
+    let trace_opts = &mut instance.config.trace_opts;
+    match change {
+        TraceOptionsFlagChange::Create => match trace_opt {
+            TraceOption::Events => trace_opts.events = true,
+            TraceOption::InternalBus => trace_opts.ibus = true,
+            TraceOption::Packets => {
+                trace_opts.packets_tx = true;
+                trace_opts.packets_rx = true;
             }
-        })
-        .delete_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let trace_opts = &mut instance.config.trace_opts;
-            match trace_opt {
-                TraceOption::Events => trace_opts.events = false,
-                TraceOption::InternalBus => trace_opts.ibus = false,
-                TraceOption::Packets => {
-                    trace_opts.packets_tx = false;
-                    trace_opts.packets_rx = false;
-                }
-                TraceOption::Route => trace_opts.route = false,
+            TraceOption::Route => trace_opts.route = true,
+        },
+        TraceOptionsFlagChange::Delete => match trace_opt {
+            TraceOption::Events => trace_opts.events = false,
+            TraceOption::InternalBus => trace_opts.ibus = false,
+            TraceOption::Packets => {
+                trace_opts.packets_tx = false;
+                trace_opts.packets_rx = false;
             }
-        })
-        .lookup(|_instance, _list_entry, dnode| {
-            let trace_opt = dnode.get_string_relative("name").unwrap();
-            let trace_opt = TraceOption::try_from_yang(&trace_opt).unwrap();
-            ListEntry::TraceOption(trace_opt)
-        })
-        .path(rip::trace_options::flag::send::PATH)
-        .modify_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut instance.config.trace_opts;
+            TraceOption::Route => trace_opts.route = false,
+        },
+        TraceOptionsFlagChange::Entry(TraceOptionsFlagEntryChange::Send(enable)) => {
             if trace_opt == TraceOption::Packets {
                 trace_opts.packets_tx = enable;
             }
-        })
-        .path(rip::trace_options::flag::receive::PATH)
-        .modify_apply(|instance, args| {
-            let trace_opt = args.list_entry.into_trace_option().unwrap();
-            let enable = args.dnode.get_bool();
-            let trace_opts = &mut instance.config.trace_opts;
+        }
+        TraceOptionsFlagChange::Entry(TraceOptionsFlagEntryChange::Receive(enable)) => {
             if trace_opt == TraceOption::Packets {
                 trace_opts.packets_rx = enable;
             }
-        })
-        .path(rip::interfaces::interface::PATH)
-        .create_apply(|instance, args| {
-            let ifname = args.dnode.get_string_relative("interface").unwrap();
-            let (iface_idx, _) = instance.interfaces.add(&ifname);
+        }
+    }
 
-            let event_queue = args.event_queue;
+    Ok(())
+}
+
+fn apply_interface<V>(instance: &mut Instance<V>, ifname: String, change: InterfaceChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError>
+where
+    V: Version,
+{
+    match change {
+        InterfaceChange::Create => {
+            let (iface_idx, _) = instance.interfaces.add(&ifname);
             event_queue.insert(Event::InterfaceUpdate(iface_idx));
             event_queue.insert(Event::InterfaceIbusSub(ifname));
-        })
-        .delete_apply(|_instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-
-            let event_queue = args.event_queue;
+        }
+        InterfaceChange::Delete => {
+            let (iface_idx, _) = instance.interfaces.get_mut_by_name(&ifname).ok_or(ApplyError::EntryNotFound)?;
             event_queue.insert(Event::InterfaceDelete(iface_idx));
-        })
-        .lookup(|instance, _list_entry, dnode| {
-            let ifname = dnode.get_string_relative("./interface").unwrap();
-            instance.interfaces.get_mut_by_name(&ifname).map(|(iface_idx, _)| ListEntry::Interface(iface_idx)).expect("could not find RIP interface")
-        })
-        .path(rip::interfaces::interface::cost::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
+        }
+        InterfaceChange::Entry(change) => {
+            let (iface_idx, iface) = instance.interfaces.get_mut_by_name(&ifname).ok_or(ApplyError::EntryNotFound)?;
+            match change {
+                InterfaceEntryChange::Cost(cost) => {
+                    iface.config.cost = Metric::from(cost);
+                    event_queue.insert(Event::InterfaceCostUpdate(iface_idx));
+                }
+                InterfaceEntryChange::Neighbor(keys, change) => {
+                    let Some(addr) = V::IpAddr::get(keys.address) else {
+                        return Ok(());
+                    };
+                    apply_interface_neighbor(iface, addr, change)?;
+                }
+                InterfaceEntryChange::NoListen(op) => {
+                    let no_listen = op == ConfigOp::Create;
+                    iface.config.no_listen = no_listen;
+                    if no_listen {
+                        event_queue.insert(Event::LeaveMulticast(iface_idx));
+                    } else {
+                        event_queue.insert(Event::JoinMulticast(iface_idx));
+                    }
+                }
+                InterfaceEntryChange::Passive(op) => {
+                    iface.config.passive = op == ConfigOp::Create;
+                }
+                InterfaceEntryChange::SplitHorizon(split_horizon) => {
+                    iface.config.split_horizon = split_horizon;
+                }
+                InterfaceEntryChange::TimersInvalidInterval(invalid_interval) => {
+                    iface.config.invalid_interval = invalid_interval;
+                }
+                InterfaceEntryChange::TimersFlushInterval(flush_interval) => {
+                    iface.config.flush_interval = flush_interval;
+                }
+                InterfaceEntryChange::AuthenticationKey(auth_key) => {
+                    iface.config.auth_key = auth_key;
+                    event_queue.insert(Event::InterfaceRestartNetTasks(iface_idx));
+                }
+                InterfaceEntryChange::AuthenticationCryptoAlgorithm(auth_algo) => {
+                    iface.config.auth_algo = auth_algo;
+                    event_queue.insert(Event::InterfaceRestartNetTasks(iface_idx));
+                }
+            }
+        }
+    }
 
-            let cost = args.dnode.get_u8();
-            let cost = Metric::from(cost);
-            iface.config.cost = cost;
+    Ok(())
+}
 
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceCostUpdate(iface_idx));
-        })
-        .path(rip::interfaces::interface::neighbors::neighbor::PATH)
-        .create_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            let addr = args.dnode.get_ip_relative("address").unwrap();
-            let addr = V::IpAddr::get(addr).unwrap();
+fn apply_interface_neighbor<V>(iface: &mut Interface<V>, addr: V::IpAddr, change: InterfaceNeighborChange) -> Result<(), ApplyError>
+where
+    V: Version,
+{
+    match change {
+        InterfaceNeighborChange::Create => {
             iface.config.explicit_neighbors.insert(addr);
-        })
-        .delete_apply(|instance, args| {
-            let (iface_idx, addr) = args.list_entry.into_static_nbr().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
+        }
+        InterfaceNeighborChange::Delete => {
             iface.config.explicit_neighbors.remove(&addr);
-        })
-        .lookup(|_instance, list_entry, dnode| {
-            let iface_idx = list_entry.into_interface().unwrap();
+        }
+    }
 
-            let addr = dnode.get_ip_relative("address").unwrap();
-            let addr = V::IpAddr::get(addr).unwrap();
-            ListEntry::StaticNbr(iface_idx, addr)
-        })
-        .path(rip::interfaces::interface::no_listen::PATH)
-        .create_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            iface.config.no_listen = true;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::LeaveMulticast(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            iface.config.no_listen = false;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::JoinMulticast(iface_idx));
-        })
-        .path(rip::interfaces::interface::passive::PATH)
-        .create_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            iface.config.passive = true;
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            iface.config.passive = false;
-        })
-        .path(rip::interfaces::interface::split_horizon::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            let split_horizon = args.dnode.get_string();
-            let split_horizon = SplitHorizon::try_from_yang(&split_horizon).unwrap();
-            iface.config.split_horizon = split_horizon;
-        })
-        .path(rip::interfaces::interface::timers::invalid_interval::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            let invalid_interval = args.dnode.get_u16();
-            iface.config.invalid_interval = invalid_interval;
-        })
-        .path(rip::interfaces::interface::timers::flush_interval::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            let flush_interval = args.dnode.get_u16();
-            iface.config.flush_interval = flush_interval;
-        })
-        .build()
+    Ok(())
 }
 
-fn load_callbacks_ripv2() -> Callbacks<Instance<Ripv2>> {
-    let core_cbs = load_callbacks();
-    CallbacksBuilder::<Instance<Ripv2>>::new(core_cbs)
-        .path(rip::interfaces::interface::authentication::key::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
+fn process_event<V>(instance: &mut Instance<V>, event: Event)
+where
+    V: Version,
+{
+    match event {
+        Event::InterfaceUpdate(iface_idx) => {
+            let Some((mut instance, interfaces)) = instance.as_up() else {
+                return;
+            };
 
-            let auth_key = args.dnode.get_string();
-            iface.config.auth_key = Some(auth_key);
+            let iface = &mut interfaces[iface_idx];
+            iface.update(&mut instance);
+        }
+        Event::InterfaceDelete(iface_idx) => {
+            if let Some((mut instance, interfaces)) = instance.as_up() {
+                let iface = &mut interfaces[iface_idx];
 
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceRestartNetTasks(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            iface.config.auth_key = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceRestartNetTasks(iface_idx));
-        })
-        .path(rip::interfaces::interface::authentication::crypto_algorithm::PATH)
-        .modify_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            let auth_algo = args.dnode.get_string();
-            let auth_algo = CryptoAlgo::try_from_yang(&auth_algo).unwrap();
-            iface.config.auth_algo = Some(auth_algo);
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceRestartNetTasks(iface_idx));
-        })
-        .delete_apply(|instance, args| {
-            let iface_idx = args.list_entry.into_interface().unwrap();
-            let iface = &mut instance.interfaces[iface_idx];
-
-            iface.config.auth_algo = None;
-
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::InterfaceRestartNetTasks(iface_idx));
-        })
-        .build()
-}
-
-fn load_callbacks_ripng() -> Callbacks<Instance<Ripng>> {
-    let core_cbs = load_callbacks();
-    CallbacksBuilder::<Instance<Ripng>>::new(core_cbs).build()
-}
-
-fn load_validation_callbacks_ripv2() -> ValidationCallbacks {
-    ValidationCallbacksBuilder::default()
-        .path(rip::interfaces::interface::neighbors::neighbor::address::PATH)
-        .validate(|args| {
-            if args.dnode.get_ip().is_ipv6() {
-                return Err("unexpected IPv6 address".to_owned());
+                // Stop interface if it's active.
+                let reason = InterfaceInactiveReason::AdminDown;
+                iface.stop(&mut instance, reason);
             }
-            Ok(())
-        })
-        .path(rip::interfaces::interface::authentication::crypto_algorithm::PATH)
-        .validate(|args| {
-            let algo = args.dnode.get_string();
-            if algo != CryptoAlgo::Md5.to_yang() {
-                return Err(format!("unsupported cryptographic algorithm (valid options: \"{}\")", CryptoAlgo::Md5.to_yang()));
-            }
-            Ok(())
-        })
-        .build()
-}
 
-fn load_validation_callbacks_ripng() -> ValidationCallbacks {
-    ValidationCallbacksBuilder::default()
-        .path(rip::interfaces::interface::neighbors::neighbor::address::PATH)
-        .validate(|args| {
-            if args.dnode.get_ip().is_ipv4() {
-                return Err("unexpected IPv4 address".to_owned());
+            // Cancel ibus subscription.
+            let iface = &mut instance.interfaces[iface_idx];
+            instance.tx.ibus.interface_unsub(Some(iface.name.clone()));
+
+            instance.interfaces.delete(iface_idx);
+        }
+        Event::InterfaceCostUpdate(iface_idx) => {
+            let Some((instance, interfaces)) = instance.as_up() else {
+                return;
+            };
+
+            let iface = &interfaces[iface_idx];
+            if !iface.state.active {
+                return;
             }
-            Ok(())
-        })
-        .build()
+
+            let distance = instance.config.distance;
+            for route in instance.state.routes.values_mut().filter(|route| !route.metric.is_infinite()) {
+                // Calculate new route metric.
+                let mut metric = iface.config.cost;
+                if let Some(rcvd_metric) = route.rcvd_metric {
+                    metric.add(rcvd_metric);
+                }
+
+                if instance.config.trace_opts.route {
+                    Debug::<V>::RouteUpdate(&route.prefix, &route.source, &metric).log();
+                }
+
+                // Update route.
+                route.metric = metric;
+                route.flags.insert(RouteFlags::CHANGED);
+
+                // Signal the output process to trigger an update.
+                instance.tx.protocol_input.trigger_update();
+
+                if !metric.is_infinite() {
+                    // Reinstall route.
+                    ibus::tx::route_install(&instance.tx.ibus, route, distance);
+                } else {
+                    // Uninstall route.
+                    ibus::tx::route_uninstall(&instance.tx.ibus, route);
+                    route.garbage_collection_start(iface.config.flush_interval, &instance.tx.protocol_input.route_gc_timeout);
+                }
+            }
+        }
+        Event::InterfaceRestartNetTasks(iface_idx) => {
+            let Some((instance, interfaces)) = instance.as_up() else {
+                return;
+            };
+
+            let iface = &mut interfaces[iface_idx];
+            if !iface.state.active {
+                return;
+            }
+
+            // Restart network Tx/Rx tasks.
+            let auth = iface.auth(&instance.state.auth_seqno);
+            if let Some(net) = &mut iface.state.net {
+                net.restart_tasks(auth, instance.tx);
+            }
+        }
+        Event::InterfaceIbusSub(ifname) => {
+            instance.tx.ibus.interface_sub(Some(ifname), Some(V::ADDRESS_FAMILY));
+        }
+        Event::JoinMulticast(iface_idx) => {
+            let iface = &mut instance.interfaces[iface_idx];
+            if let Some(net) = &iface.state.net {
+                iface.system.join_multicast(&net.socket);
+            }
+        }
+        Event::LeaveMulticast(iface_idx) => {
+            let iface = &mut instance.interfaces[iface_idx];
+            if let Some(net) = &iface.state.net {
+                iface.system.leave_multicast(&net.socket);
+            }
+        }
+        Event::ReinstallRoutes => {
+            let Some((instance, _)) = instance.as_up() else {
+                return;
+            };
+
+            for route in instance.state.routes.values() {
+                let distance = instance.config.distance;
+                ibus::tx::route_install(&instance.tx.ibus, route, distance);
+            }
+        }
+        Event::ResetUpdateInterval => {
+            let Some((instance, _)) = instance.as_up() else {
+                return;
+            };
+
+            let interval = Duration::from_secs(instance.config.update_interval.into());
+            instance.state.update_interval_task.reset(Some(interval));
+        }
+    }
 }
 
 // ===== impl Instance =====
@@ -393,140 +367,18 @@ impl<V> Provider for Instance<V>
 where
     V: Version,
 {
-    type ListEntry = ListEntry<V>;
     type Event = Event;
     type Resource = Resource;
+    type Change = ConfigChange;
 
-    fn callbacks() -> &'static Callbacks<Instance<V>> {
-        V::configuration_callbacks()
+    const YANG_OPS_CONFIG: YangConfigOps<ConfigChange> = config::YANG_OPS_CONFIG;
+
+    fn apply(&mut self, change: ConfigChange, _resource: &mut Option<Resource>, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+        apply_instance(self, change, event_queue)
     }
 
     fn process_event(&mut self, event: Event) {
-        match event {
-            Event::InterfaceUpdate(iface_idx) => {
-                let Some((mut instance, interfaces)) = self.as_up() else {
-                    return;
-                };
-
-                let iface = &mut interfaces[iface_idx];
-                iface.update(&mut instance);
-            }
-            Event::InterfaceDelete(iface_idx) => {
-                if let Some((mut instance, interfaces)) = self.as_up() {
-                    let iface = &mut interfaces[iface_idx];
-
-                    // Stop interface if it's active.
-                    let reason = InterfaceInactiveReason::AdminDown;
-                    iface.stop(&mut instance, reason);
-                }
-
-                // Cancel ibus subscription.
-                let iface = &mut self.interfaces[iface_idx];
-                self.tx.ibus.interface_unsub(Some(iface.name.clone()));
-
-                self.interfaces.delete(iface_idx);
-            }
-            Event::InterfaceCostUpdate(iface_idx) => {
-                let Some((instance, interfaces)) = self.as_up() else {
-                    return;
-                };
-
-                let iface = &interfaces[iface_idx];
-                if !iface.state.active {
-                    return;
-                }
-
-                let distance = instance.config.distance;
-                for route in instance.state.routes.values_mut().filter(|route| !route.metric.is_infinite()) {
-                    // Calculate new route metric.
-                    let mut metric = iface.config.cost;
-                    if let Some(rcvd_metric) = route.rcvd_metric {
-                        metric.add(rcvd_metric);
-                    }
-
-                    if instance.config.trace_opts.route {
-                        Debug::<V>::RouteUpdate(&route.prefix, &route.source, &metric).log();
-                    }
-
-                    // Update route.
-                    route.metric = metric;
-                    route.flags.insert(RouteFlags::CHANGED);
-
-                    // Signal the output process to trigger an update.
-                    instance.tx.protocol_input.trigger_update();
-
-                    if !metric.is_infinite() {
-                        // Reinstall route.
-                        ibus::tx::route_install(&instance.tx.ibus, route, distance);
-                    } else {
-                        // Uninstall route.
-                        ibus::tx::route_uninstall(&instance.tx.ibus, route);
-                        route.garbage_collection_start(iface.config.flush_interval, &instance.tx.protocol_input.route_gc_timeout);
-                    }
-                }
-            }
-            Event::InterfaceRestartNetTasks(iface_idx) => {
-                let Some((instance, interfaces)) = self.as_up() else {
-                    return;
-                };
-
-                let iface = &mut interfaces[iface_idx];
-                if !iface.state.active {
-                    return;
-                }
-
-                // Restart network Tx/Rx tasks.
-                let auth = iface.auth(&instance.state.auth_seqno);
-                if let Some(net) = &mut iface.state.net {
-                    net.restart_tasks(auth, instance.tx);
-                }
-            }
-            Event::InterfaceIbusSub(ifname) => {
-                self.tx.ibus.interface_sub(Some(ifname), Some(V::ADDRESS_FAMILY));
-            }
-            Event::JoinMulticast(iface_idx) => {
-                let iface = &mut self.interfaces[iface_idx];
-                if let Some(net) = &iface.state.net {
-                    iface.system.join_multicast(&net.socket);
-                }
-            }
-            Event::LeaveMulticast(iface_idx) => {
-                let iface = &mut self.interfaces[iface_idx];
-                if let Some(net) = &iface.state.net {
-                    iface.system.leave_multicast(&net.socket);
-                }
-            }
-            Event::ReinstallRoutes => {
-                let Some((instance, _)) = self.as_up() else {
-                    return;
-                };
-
-                for route in instance.state.routes.values() {
-                    let distance = instance.config.distance;
-                    ibus::tx::route_install(&instance.tx.ibus, route, distance);
-                }
-            }
-            Event::ResetUpdateInterval => {
-                let Some((instance, _)) = self.as_up() else {
-                    return;
-                };
-
-                let interval = Duration::from_secs(instance.config.update_interval.into());
-                instance.state.update_interval_task.reset(Some(interval));
-            }
-        }
-    }
-}
-
-// ===== impl ListEntry =====
-
-#[allow(clippy::derivable_impls)]
-impl<V> Default for ListEntry<V>
-where
-    V: Version,
-{
-    fn default() -> ListEntry<V> {
-        ListEntry::None
+        process_event(self, event);
     }
 }
 
@@ -576,4 +428,33 @@ where
             auth_algo: None,
         }
     }
+}
+
+// ===== global functions =====
+
+pub fn validate(config: &DataTree<'static>) -> Result<(), ValidationError> {
+    // Ensure explicit neighbor addresses match the RIP version.
+    for dnode in config.iter_path(rip::interfaces::interface::neighbors::neighbor::address::PATH) {
+        let Some(ptype) = dnode.ancestor(control_plane_protocol::PATH).and_then(|dnode| dnode.get_typed_relative::<Protocol>("./type")) else {
+            let message = "failed to retrieve data node";
+            return Err(ValidationError::new(&dnode, message));
+        };
+        let Some(addr) = dnode.get_typed::<IpAddr>() else {
+            let message = "failed to parse data node value";
+            return Err(ValidationError::new(&dnode, message));
+        };
+        match ptype {
+            Protocol::RIPV2 if addr.is_ipv6() => {
+                let message = "unexpected IPv6 address";
+                return Err(ValidationError::new(&dnode, message));
+            }
+            Protocol::RIPNG if addr.is_ipv4() => {
+                let message = "unexpected IPv4 address";
+                return Err(ValidationError::new(&dnode, message));
+            }
+            _ => (),
+        }
+    }
+
+    Ok(())
 }

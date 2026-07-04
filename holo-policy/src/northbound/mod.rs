@@ -12,10 +12,19 @@ pub mod state;
 #[allow(unused_imports, unused_variables)]
 #[allow(clippy::module_inception)]
 pub mod yang_gen {
+    use holo_utils::bgp::{AfiSafi, Comm, ExtComm, Extv6Comm, LargeComm, Origin};
+    use holo_utils::ip::AddressFamily;
+    use holo_utils::policy::{BgpNexthop, BgpSetCommOptions, BgpSetMed, MatchSetRestrictedType, MatchSetType, MetricModification, MetricType, RouteLevel, RouteTag, RouteType};
+    use holo_utils::protocol::Protocol;
+
     include!(concat!(env!("OUT_DIR"), "/yang_objects.rs"));
     pub mod ops {
         use crate::Master;
         type Provider = Master;
         include!(concat!(env!("OUT_DIR"), "/yang_ops.rs"));
+    }
+    pub mod config {
+        use super::*;
+        include!(concat!(env!("OUT_DIR"), "/yang_config.rs"));
     }
 }

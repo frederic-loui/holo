@@ -8,7 +8,6 @@ use std::net::IpAddr;
 
 use holo_northbound::{NbProviderSender, notification};
 use holo_utils::bfd::SessionKey;
-use holo_yang::ToYang;
 
 use crate::northbound::yang_gen as yang;
 use crate::session::Session;
@@ -46,7 +45,7 @@ fn state_change_singlehop(ifname: &str, dst: IpAddr, nb_tx: &NbProviderSender, s
         dest_addr: Some(dst),
         source_addr: sess.config.src,
         session_index: Some(sess.id as u32),
-        path_type: Some(sess.key.path_type().to_yang()),
+        path_type: Some(sess.key.path_type()),
         interface: Some(ifname.into()),
         echo_enabled: Some(false),
     };
@@ -65,7 +64,7 @@ fn state_change_multihop(src: IpAddr, dst: IpAddr, nb_tx: &NbProviderSender, ses
         dest_addr: Some(dst),
         source_addr: Some(src),
         session_index: Some(sess.id as u32),
-        path_type: Some(sess.key.path_type().to_yang()),
+        path_type: Some(sess.key.path_type()),
     };
     notification::send(nb_tx, multihop_notification::PATH, data);
 }

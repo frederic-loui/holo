@@ -65,15 +65,18 @@ impl Master {
         let _event_aggregator =
             event_aggregator(nb_rx, ibus_conn_rx, netlink_rx, agg_tx);
 
-        let mut resources = vec![];
+        let mut pending_changes = vec![];
         loop {
-            // Receive event message.
-            let msg = agg_rx.blocking_recv().unwrap();
+            // Receive event message, exiting when the aggregator task
+            // goes away.
+            let Some(msg) = agg_rx.blocking_recv() else {
+                return;
+            };
 
             // Process event message.
             match msg {
                 EventMsg::Northbound(Some(msg)) => {
-                    process_northbound_msg(self, &mut resources, msg);
+                    process_northbound_msg(self, &mut pending_changes, msg);
                 }
                 EventMsg::Northbound(None) => {
                     // Exit when northbound channel closes.

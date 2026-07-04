@@ -122,7 +122,7 @@ pub struct MessageStatistics {
     pub total_bytes: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum LabelDistMode {
     Independent,
     Ordered,

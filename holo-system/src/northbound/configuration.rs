@@ -4,21 +4,13 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::sync::LazyLock as Lazy;
+use std::collections::BTreeSet;
 
-use holo_northbound::configuration::{self, Callbacks, CallbacksBuilder, Provider};
-use holo_utils::yang::DataNodeRefExt;
+use holo_northbound::configuration::{Provider, YangConfigOps};
+use holo_northbound::error::ApplyError;
 
-use crate::northbound::yang_gen::system;
+use crate::northbound::yang_gen::config::{self, ConfigChange};
 use crate::{Master, ibus};
-
-static CALLBACKS: Lazy<configuration::Callbacks<Master>> = Lazy::new(load_callbacks);
-
-#[derive(Debug, Default)]
-pub enum ListEntry {
-    #[default]
-    None,
-}
 
 #[derive(Debug)]
 pub enum Resource {}
@@ -37,61 +29,49 @@ pub struct SystemCfg {
     pub location: Option<String>,
 }
 
-// ===== callbacks =====
+// ===== helper functions =====
 
-fn load_callbacks() -> Callbacks<Master> {
-    CallbacksBuilder::<Master>::default()
-        .path(system::contact::PATH)
-        .modify_apply(|master, args| {
-            let contact = args.dnode.get_string();
-            master.config.contact = Some(contact);
-        })
-        .delete_apply(|master, _args| {
-            master.config.contact = None;
-        })
-        .path(system::hostname::PATH)
-        .modify_apply(|master, args| {
-            let hostname = args.dnode.get_string();
-            master.config.hostname = Some(hostname);
-
-            let event_queue = args.event_queue;
+fn apply_master(master: &mut Master, change: ConfigChange, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+    match change {
+        ConfigChange::Contact(contact) => {
+            master.config.contact = contact;
+        }
+        ConfigChange::Hostname(hostname) => {
+            master.config.hostname = hostname;
             event_queue.insert(Event::HostnameChange);
-        })
-        .delete_apply(|master, args| {
-            master.config.hostname = None;
+        }
+        ConfigChange::Location(location) => {
+            master.config.location = location;
+        }
+    }
 
-            let event_queue = args.event_queue;
-            event_queue.insert(Event::HostnameChange);
-        })
-        .path(system::location::PATH)
-        .modify_apply(|master, args| {
-            let location = args.dnode.get_string();
-            master.config.location = Some(location);
-        })
-        .delete_apply(|master, _args| {
-            master.config.location = None;
-        })
-        .build()
+    Ok(())
+}
+
+fn process_event(master: &mut Master, event: Event) {
+    match event {
+        Event::HostnameChange => {
+            for ibus_tx in master.hostname_subscriptions.values() {
+                ibus::notify_hostname_update(ibus_tx, master.config.hostname.clone());
+            }
+        }
+    }
 }
 
 // ===== impl Master =====
 
 impl Provider for Master {
-    type ListEntry = ListEntry;
     type Event = Event;
     type Resource = Resource;
+    type Change = ConfigChange;
 
-    fn callbacks() -> &'static Callbacks<Master> {
-        &CALLBACKS
+    const YANG_OPS_CONFIG: YangConfigOps<ConfigChange> = config::YANG_OPS_CONFIG;
+
+    fn apply(&mut self, change: ConfigChange, _resource: &mut Option<Resource>, event_queue: &mut BTreeSet<Event>) -> Result<(), ApplyError> {
+        apply_master(self, change, event_queue)
     }
 
     fn process_event(&mut self, event: Event) {
-        match event {
-            Event::HostnameChange => {
-                for ibus_tx in self.hostname_subscriptions.values() {
-                    ibus::notify_hostname_update(ibus_tx, self.config.hostname.clone());
-                }
-            }
-        }
+        process_event(self, event);
     }
 }

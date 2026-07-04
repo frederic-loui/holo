@@ -9,7 +9,9 @@ use yang5::schema::{SchemaNode, SchemaNodeKind};
 
 use crate::yang_codegen::SchemaNodeCodegenExt;
 use crate::yang_codegen::code_writer::{CodeWriter, emit};
-use crate::yang_codegen::types::SchemaLeafTypeCodegenExt;
+use crate::yang_codegen::types::{
+    SchemaLeafTypeCodegenExt, TypeSpec, leaf_spec,
+};
 
 pub struct StructBuilder<'a> {
     pub snode: SchemaNode<'a>,
@@ -101,15 +103,26 @@ impl<'a> StructBuilder<'a> {
         Ok(())
     }
 
+    // Returns the `TypeSpec` of a leaf field. Keys of lists without state
+    // descendants keep their base type: those structs are only rendered as
+    // path predicates, and their per-leaf registered types may lack ToYang
+    // implementations.
+    fn field_spec(&self, snode: &SchemaNode<'_>) -> Option<TypeSpec> {
+        if snode.is_list_key() && !self.snode.is_state_list() {
+            return Some(snode.leaf_type()?.spec());
+        }
+        leaf_spec(snode)
+    }
+
     // Returns true if the generated struct needs a lifetime parameter.
     pub fn needs_lifetime(&self) -> bool {
         if self.use_owned_types {
             return false;
         }
         self.fields.iter().any(|snode| match snode.kind() {
-            SchemaNodeKind::Leaf => {
-                !snode.leaf_type().is_some_and(|t| t.spec().copy_semantics)
-            }
+            SchemaNodeKind::Leaf => !self
+                .field_spec(snode)
+                .is_some_and(|spec| spec.copy_semantics),
             SchemaNodeKind::LeafList => true,
             _ => StructBuilder::new(snode.clone()).needs_lifetime(),
         })
@@ -133,8 +146,7 @@ impl<'a> StructBuilder<'a> {
                 )
             }
             SchemaNodeKind::Leaf => {
-                let leaf_type = snode.leaf_type().unwrap();
-                let spec = leaf_type.spec();
+                let spec = self.field_spec(snode).unwrap();
                 let field_type = if spec.copy_semantics || self.use_owned_types
                 {
                     spec.rust_type
@@ -148,8 +160,7 @@ impl<'a> StructBuilder<'a> {
                 }
             }
             SchemaNodeKind::LeafList => {
-                let leaf_type = snode.leaf_type().unwrap();
-                let spec = leaf_type.spec();
+                let spec = leaf_spec(snode).unwrap();
                 if self.use_owned_types {
                     format!("Vec<{}>", spec.rust_type)
                 } else {
@@ -258,8 +269,7 @@ impl<'a> StructBuilder<'a> {
                     emit!(w, 4, "{field_name}.into_data_node(&mut dnode);")?;
                 }
                 SchemaNodeKind::Leaf => {
-                    let leaf_type = snode.leaf_type().unwrap();
-                    let spec = leaf_type.spec();
+                    let spec = leaf_spec(snode).unwrap();
                     let value = to_yang_expr(spec.rust_type, &field_name);
                     let output = if snode.is_within_output() {
                         "true"
@@ -274,8 +284,7 @@ impl<'a> StructBuilder<'a> {
                     )?;
                 }
                 SchemaNodeKind::LeafList => {
-                    let leaf_type = snode.leaf_type().unwrap();
-                    let spec = leaf_type.spec();
+                    let spec = leaf_spec(snode).unwrap();
                     emit!(w, 4, "for element in {field_name} {{")?;
                     let value = to_yang_expr(spec.rust_type, "element");
                     let output = if snode.is_within_output() {
@@ -311,7 +320,7 @@ impl<'a> StructBuilder<'a> {
             .list_keys()
             .map(|snode| {
                 let field = format!("self.{}", snode.rust_name(Case::Snake));
-                let spec = snode.leaf_type().unwrap().spec();
+                let spec = self.field_spec(&snode).unwrap();
                 match spec.rust_type {
                     "String" => field,
                     _ => format!("{field}.to_yang()"),
@@ -389,7 +398,7 @@ impl<'a> StructBuilder<'a> {
 
             match snode.kind() {
                 SchemaNodeKind::Leaf => {
-                    let spec = snode.leaf_type().unwrap().spec();
+                    let spec = leaf_spec(snode).unwrap();
                     let expr = from_yang_expr(spec.rust_type, snode_name);
                     emit!(w, depth, "{field_name}: {expr},")?;
                 }

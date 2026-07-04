@@ -169,6 +169,10 @@ pub struct TagSet {
     pub tags: BTreeSet<u32>,
 }
 
+// Route tag expressed as either a decimal or hexadecimal integer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteTag(pub u32);
+
 // BGP sets of attributes used in policy match statements.
 #[derive(Clone, Debug, Default)]
 #[derive(Deserialize, Serialize)]
@@ -400,7 +404,7 @@ pub enum BgpNexthop {
     NexthopSelf,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[derive(Deserialize, Serialize)]
 pub enum BgpSetMed {
     Add(u32),
@@ -589,6 +593,74 @@ impl TryFromYang for MatchSetRestrictedType {
         match identity {
             "any" => Some(MatchSetRestrictedType::Any),
             "invert" => Some(MatchSetRestrictedType::Invert),
+            _ => None,
+        }
+    }
+}
+
+// ===== impl RouteTag =====
+
+impl TryFromYang for RouteTag {
+    fn try_from_yang(value: &str) -> Option<RouteTag> {
+        // Parse tag in the decimal format.
+        if let Ok(tag) = value.parse::<u32>() {
+            return Some(RouteTag(tag));
+        }
+
+        // Parse tag in the hexadecimal format (colon separated byte groups).
+        let bytes = value
+            .split(':')
+            .map(|byte| u8::from_str_radix(byte, 16).ok())
+            .collect::<Option<Vec<_>>>()?;
+        if bytes.len() > 4 {
+            return None;
+        }
+        let tag = bytes
+            .into_iter()
+            .fold(0u32, |tag, byte| (tag << 8) | u32::from(byte));
+        Some(RouteTag(tag))
+    }
+}
+
+// ===== impl BgpNexthop =====
+
+impl TryFromYang for BgpNexthop {
+    fn try_from_yang(value: &str) -> Option<BgpNexthop> {
+        match value {
+            "self" => Some(BgpNexthop::NexthopSelf),
+            value => value.parse().ok().map(BgpNexthop::Addr),
+        }
+    }
+}
+
+// ===== impl BgpSetMed =====
+
+impl TryFromYang for BgpSetMed {
+    fn try_from_yang(value: &str) -> Option<BgpSetMed> {
+        match value {
+            "igp" => Some(BgpSetMed::Igp),
+            "med-plus-igp" => Some(BgpSetMed::MedPlusIgp),
+            value => {
+                if let Some(value) = value.strip_prefix('+') {
+                    value.parse().ok().map(BgpSetMed::Add)
+                } else if let Some(value) = value.strip_prefix('-') {
+                    value.parse().ok().map(BgpSetMed::Subtract)
+                } else {
+                    value.parse().ok().map(BgpSetMed::Set)
+                }
+            }
+        }
+    }
+}
+
+// ===== impl BgpSetCommOptions =====
+
+impl TryFromYang for BgpSetCommOptions {
+    fn try_from_yang(value: &str) -> Option<BgpSetCommOptions> {
+        match value {
+            "add" => Some(BgpSetCommOptions::Add),
+            "remove" => Some(BgpSetCommOptions::Remove),
+            "replace" => Some(BgpSetCommOptions::Replace),
             _ => None,
         }
     }

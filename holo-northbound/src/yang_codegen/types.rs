@@ -4,14 +4,29 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use yang5::schema::{DataValueType, SchemaLeafType};
+use holo_utils::yang::SchemaLeafTypeExt;
+use yang5::context::Context;
+use yang5::schema::{
+    DataValueType, SchemaLeafType, SchemaNode, SchemaNodeKind, SchemaPathFormat,
+};
 
 // Extra typedef mappings registered by individual crates.
 static EXTRA_TYPEDEFS: OnceLock<HashMap<&'static str, TypeSpec>> =
     OnceLock::new();
+
+// Per-base-identity type mappings registered by individual crates, keyed by
+// the name of the identityref's direct base identity.
+static IDENTITY_TYPES: OnceLock<HashMap<&'static str, TypeSpec>> =
+    OnceLock::new();
+
+// Per-leaf type mappings registered by individual crates, keyed by schema
+// path. Overrides for leaves whose YANG type has no stable handle (inline
+// enumerations and unions), or whose typedef or base identity maps to
+// different Rust types depending on the leaf.
+static LEAF_TYPES: OnceLock<HashMap<&'static str, TypeSpec>> = OnceLock::new();
 
 // Maps a YANG leaf type to its Rust type.
 #[derive(Clone, Copy, Debug)]
@@ -42,6 +57,15 @@ impl SchemaLeafTypeCodegenExt for SchemaLeafType<'_> {
             return real_type.spec();
         }
 
+        // Handle identityref, resolved by the name of its base identity.
+        if let Some(spec) = IDENTITY_TYPES.get().and_then(|map| {
+            self.identityref_bases()
+                .iter()
+                .find_map(|base| map.get(base.as_str()))
+        }) {
+            return *spec;
+        }
+
         // Handle base type.
         base_type_spec(self.base_type())
     }
@@ -55,6 +79,78 @@ pub fn register_typedefs(typedefs: &[(&'static str, TypeSpec)]) {
     EXTRA_TYPEDEFS
         .set(typedefs.iter().copied().collect())
         .expect("typedefs already registered");
+}
+
+// Registers crate-specific per-base-identity type mappings, keyed by the
+// name of the identityref's direct base identity, before code generation.
+// Must be called at most once per build script. Panics when a registered
+// name does not match the base identity of any identityref leaf in the
+// loaded schema.
+pub fn register_identity_types(
+    yang_ctx: &Context,
+    identity_types: &[(&'static str, TypeSpec)],
+) {
+    let mut bases = HashSet::new();
+    for snode in yang_ctx.traverse() {
+        let Some(ltype) = snode.leaf_type() else {
+            continue;
+        };
+        bases.extend(ltype.identityref_bases());
+        if let Some(real_type) = ltype.leafref_real_type() {
+            bases.extend(real_type.identityref_bases());
+        }
+    }
+    for (name, _) in identity_types {
+        if !bases.contains(*name) {
+            panic!(
+                "Registered identity type doesn't match the base identity \
+                 of any identityref leaf: {name}"
+            );
+        }
+    }
+    IDENTITY_TYPES
+        .set(identity_types.iter().copied().collect())
+        .expect("identity types already registered");
+}
+
+// Registers crate-specific per-leaf type mappings, keyed by schema path,
+// before code generation. Must be called at most once per build script.
+// Panics when a registered path does not match any leaf or leaf-list node
+// of the loaded schema.
+pub fn register_leaf_types(
+    yang_ctx: &Context,
+    leaf_types: &[(&'static str, TypeSpec)],
+) {
+    let leaf_paths = yang_ctx
+        .traverse()
+        .filter(|snode| {
+            matches!(
+                snode.kind(),
+                SchemaNodeKind::Leaf | SchemaNodeKind::LeafList
+            )
+        })
+        .map(|snode| snode.path(SchemaPathFormat::DATA))
+        .collect::<HashSet<_>>();
+    for (path, _) in leaf_types {
+        if !leaf_paths.contains(*path) {
+            panic!("Registered leaf type path doesn't match any leaf: {path}");
+        }
+    }
+    LEAF_TYPES
+        .set(leaf_types.iter().copied().collect())
+        .expect("leaf types already registered");
+}
+
+// Returns the `TypeSpec` of a leaf or leaf-list node, honoring per-leaf
+// registered overrides.
+pub(crate) fn leaf_spec(snode: &SchemaNode<'_>) -> Option<TypeSpec> {
+    if let Some(spec) = LEAF_TYPES
+        .get()
+        .and_then(|map| map.get(snode.path(SchemaPathFormat::DATA).as_str()))
+    {
+        return Some(*spec);
+    }
+    Some(snode.leaf_type()?.spec())
 }
 
 // ===== helper functions =====
@@ -130,12 +226,18 @@ fn typedef_spec(typedef_name: &str) -> Option<TypeSpec> {
             copy_semantics: true,
         }),
         // ietf-inet-types, ietf-yang-types, ietf-routing-types
-        "ipv4-address" | "dotted-quad" | "router-id" => Some(TypeSpec {
+        "ipv4-address"
+        | "ipv4-address-no-zone"
+        | "dotted-quad"
+        | "router-id"
+        | "ipv4-multicast-group-address" => Some(TypeSpec {
             rust_type: "Ipv4Addr",
             copy_semantics: true,
         }),
-        // ietf-inet-types
-        "ipv6-address" => Some(TypeSpec {
+        // ietf-inet-types, ietf-routing-types
+        "ipv6-address"
+        | "ipv6-address-no-zone"
+        | "ipv6-multicast-group-address" => Some(TypeSpec {
             rust_type: "Ipv6Addr",
             copy_semantics: true,
         }),

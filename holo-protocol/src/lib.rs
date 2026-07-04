@@ -252,7 +252,7 @@ async fn event_loop<P>(
 ) where
     P: ProtocolInstance,
 {
-    let mut resources = vec![];
+    let mut pending_changes = vec![];
 
     // Spawn event aggregator task.
     let _event_aggregator =
@@ -271,7 +271,7 @@ async fn event_loop<P>(
         // Process event message.
         match msg {
             InstanceMsg::Northbound(Some(msg)) => {
-                process_northbound_msg(instance, &mut resources, msg);
+                process_northbound_msg(instance, &mut pending_changes, msg);
             }
             InstanceMsg::Northbound(None) => {
                 // Instance was unconfigured.

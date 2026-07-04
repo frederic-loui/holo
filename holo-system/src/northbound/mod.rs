@@ -17,4 +17,8 @@ pub mod yang_gen {
         type Provider = Master;
         include!(concat!(env!("OUT_DIR"), "/yang_ops.rs"));
     }
+    pub mod config {
+        use super::*;
+        include!(concat!(env!("OUT_DIR"), "/yang_config.rs"));
+    }
 }

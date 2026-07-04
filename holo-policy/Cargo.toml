@@ -8,7 +8,6 @@ edition.workspace = true
 [dependencies]
 chrono.workspace = true
 derive-new.workspace = true
-enum-as-inner.workspace = true
 futures.workspace = true
 ipnetwork.workspace = true
 phf.workspace = true

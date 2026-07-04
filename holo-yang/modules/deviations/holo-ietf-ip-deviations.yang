@@ -19,6 +19,19 @@ module holo-ietf-ip-deviations {
      module.";
 
   /*
+   * Added constraints
+   */
+
+  deviation "/if:interfaces/if:interface/ip:ipv4/ip:mtu" {
+    deviate add {
+      must 'not(../../ip:ipv6/ip:mtu) or . = ../../ip:ipv6/ip:mtu' {
+        error-message
+          "The IPv4 and IPv6 MTUs must be the same.";
+      }
+    }
+  }
+
+  /*
    * Not supported nodes
    */
 
