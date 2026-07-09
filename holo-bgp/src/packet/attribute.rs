@@ -1244,7 +1244,7 @@ impl MpReachNlri {
 impl MpUnreachNlri {
     pub const MIN_LEN: u16 = 3;
 
-    fn encode(&self, buf: &mut BytesMut) {
+    pub(crate) fn encode(&self, buf: &mut BytesMut) {
         buf.put_u8((AttrFlags::OPTIONAL | AttrFlags::EXTENDED).bits());
         buf.put_u8(AttrType::MpUnreachNlri as u8);
 

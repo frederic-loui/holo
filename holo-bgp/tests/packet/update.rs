@@ -14,8 +14,8 @@ use holo_bgp::packet::attribute::{
 };
 use holo_bgp::packet::iana::Origin;
 use holo_bgp::packet::message::{
-    DecodeCxt, Message, MpReachNlri, MpUnreachNlri, NegotiatedCapability,
-    ReachNlri, UnreachNlri, UpdateMsg,
+    DecodeCxt, EncodeCxt, Message, MpReachNlri, MpUnreachNlri,
+    NegotiatedCapability, ReachNlri, UnreachNlri, UpdateMsg,
 };
 use holo_utils::bgp::{Comm, ExtComm, Extv6Comm, LargeComm};
 
@@ -189,4 +189,41 @@ fn test_decode_malformed_updates() {
             let _ = Message::decode(&bytes[0..msg_size], &cxt);
         }
     }
+}
+
+// Regression: a withdraw-only UPDATE whose sole path attribute is
+// MP_UNREACH_NLRI (i.e. `attrs` is None) must still encode that attribute.
+// Otherwise the message has an empty attribute section and is byte-identical
+// to an End-of-RIB marker (23 bytes), which silently drops the withdrawal.
+#[test]
+fn test_encode_mp_unreach_only_update() {
+    let encode_cxt = EncodeCxt {
+        capabilities: [NegotiatedCapability::FourOctetAsNumber].into(),
+    };
+    let msg = Message::Update(UpdateMsg {
+        reach: None,
+        unreach: None,
+        mp_reach: None,
+        mp_unreach: Some(MpUnreachNlri::Ipv6Unicast {
+            prefixes: vec![net6!("2001:db8:2::1/128")],
+        }),
+        attrs: None,
+    });
+
+    let bytes = msg.encode(&encode_cxt);
+
+    // Must not collapse to the 23-byte End-of-RIB marker...
+    assert_ne!(bytes.len(), 23);
+
+    // ...and must round-trip back to the same message.
+    let decode_cxt = DecodeCxt {
+        peer_type: PeerType::Internal,
+        peer_as: 65550,
+        reject_as_sets: true,
+        capabilities: [NegotiatedCapability::FourOctetAsNumber].into(),
+    };
+    let msg_size = Message::get_message_len(&bytes)
+        .expect("Buffer doesn't contain a full BGP message");
+    let decoded = Message::decode(&bytes[0..msg_size], &decode_cxt).unwrap();
+    assert_eq!(decoded, msg);
 }
