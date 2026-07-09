@@ -95,9 +95,12 @@ pub(crate) fn process_vrrp_packet(
 
     // RFC 3768: Section 6.4.2 ("If an ADVERTISEMENT is received")
     match instance.state.state {
-        fsm::State::Initialize => {
-            unreachable!()
-        }
+        // An advertisement can still be delivered while the router is in the
+        // Initialize state: the receive task may have enqueued the packet just
+        // before the instance was shut down and transitioned back to
+        // Initialize. Ignore it rather than treating it as unreachable, which
+        // would panic the process.
+        fsm::State::Initialize => {}
         fsm::State::Backup => {
             if packet.priority == 0 {
                 let duration =
