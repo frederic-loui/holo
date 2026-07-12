@@ -1039,10 +1039,10 @@ impl Neighbor {
                 if let Some((route, _)) = adj_rib.in_post() {
                     rib::nexthop_untrack(nht, &prefix, route, ibus_tx);
                 }
-            }
 
-            // Enqueue prefix for the BGP Decision Process.
-            table.queued_prefixes.insert(prefix);
+                // Enqueue prefix for the BGP Decision Process.
+                table.queued_prefixes.insert(prefix);
+            }
         }
     }
 
