@@ -28,6 +28,9 @@ use crate::packet::attribute::{Attrs, CommList, CommType};
 use crate::rib::RouteOrigin;
 use crate::tasks::messages::input::PolicyResultMsg;
 
+// Maximum number of prefixes carried by a single policy apply message.
+pub(crate) const POLICY_APPLY_BATCH_SIZE_MAX: usize = 4096;
+
 // Represents a simplified version of `Route`, containing only information
 // relevant for the application of routing policies.
 #[derive(Clone, Debug)]

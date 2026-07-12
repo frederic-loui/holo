@@ -28,7 +28,7 @@ use crate::packet::iana::{Afi, Safi};
 use crate::packet::message::{
     Capability, Message, MpReachNlri, MpUnreachNlri, RouteRefreshMsg, UpdateMsg,
 };
-use crate::policy::RoutePolicyInfo;
+use crate::policy::{POLICY_APPLY_BATCH_SIZE_MAX, RoutePolicyInfo};
 use crate::rib::{
     AttrSetsCxt, BestRoute, Redistribute, Rib, Route, RouteOrigin,
     RoutingTable, SelectionState,
@@ -931,22 +931,26 @@ pub(crate) fn advertise_routes<A>(
         prefixes.push(prefix.into());
     }
 
-    // Enqueue export policy application, one message per group.
+    // Enqueue export policy application, one message per group. Large groups
+    // are split into fixed-size batches so their processing is spread across
+    // all policy tasks.
     for (route, prefixes) in groups.into_values() {
-        let msg = PolicyApplyMsg::Neighbor {
-            policy_type: PolicyType::Export,
-            nbr_addr: nbr.remote_addr,
-            afi_safi: A::AFI_SAFI,
-            prefixes,
-            route,
-            policies: apply_policy_cfg
-                .export_policy
-                .iter()
-                .map(|policy| shared.policies.get(policy).unwrap().clone())
-                .collect(),
-            match_sets: shared.policy_match_sets.clone(),
-            default_policy: apply_policy_cfg.default_export_policy,
-        };
-        policy_apply_tasks.enqueue(msg);
+        for prefixes in prefixes.chunks(POLICY_APPLY_BATCH_SIZE_MAX) {
+            let msg = PolicyApplyMsg::Neighbor {
+                policy_type: PolicyType::Export,
+                nbr_addr: nbr.remote_addr,
+                afi_safi: A::AFI_SAFI,
+                prefixes: prefixes.to_vec(),
+                route: route.clone(),
+                policies: apply_policy_cfg
+                    .export_policy
+                    .iter()
+                    .map(|policy| shared.policies.get(policy).unwrap().clone())
+                    .collect(),
+                match_sets: shared.policy_match_sets.clone(),
+                default_policy: apply_policy_cfg.default_export_policy,
+            };
+            policy_apply_tasks.enqueue(msg);
+        }
     }
 }
