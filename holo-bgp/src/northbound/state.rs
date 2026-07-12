@@ -21,7 +21,7 @@ use crate::northbound::yang_gen::{self, bgp};
 use crate::packet::attribute::{AsPathSegment, AttrFlags, BaseAttrs, Comms, ExtComms, Extv6Comms, LargeComms, UnknownAttr};
 use crate::packet::iana::{Afi, Safi};
 use crate::packet::message::{AddPathTuple, Capability};
-use crate::rib::{AttrSet, Destination, LocalRoute, Route};
+use crate::rib::{AttrSet, Destination, LocalRoute, Route, SelectionState};
 
 pub static AFI_SAFIS: [AfiSafi; 2] = [AfiSafi::Ipv4Unicast, AfiSafi::Ipv6Unicast];
 
@@ -384,7 +384,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::attr_sets::attr_set::AttrSet {
 
     fn new(_instance: &'a Instance, attr_set: &Self::ListEntry) -> Self {
         Self {
-            index: attr_set.index,
+            index: attr_set.index.get(),
         }
     }
 }
@@ -481,7 +481,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::communities::community::Community<
     fn new(_instance: &'a Instance, comms: &Self::ListEntry) -> Self {
         let communities = comms.value.0.iter().map(|c| c.to_yang());
         Self {
-            index: comms.index,
+            index: comms.index.get(),
             community: Some(Box::new(communities)),
         }
     }
@@ -500,7 +500,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::ext_communities::ext_community::Ex
     fn new(_instance: &'a Instance, comms: &Self::ListEntry) -> Self {
         let communities = comms.value.0.iter().map(|c| c.to_yang());
         Self {
-            index: comms.index,
+            index: comms.index.get(),
             ext_community: Some(Box::new(communities)),
             ext_community_raw: None, // TODO
         }
@@ -520,7 +520,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::ipv6_ext_communities::ipv6_ext_com
     fn new(_instance: &'a Instance, comms: &Self::ListEntry) -> Self {
         let communities = comms.value.0.iter().map(|c| c.to_yang());
         Self {
-            index: comms.index,
+            index: comms.index.get(),
             ipv6_ext_community: Some(Box::new(communities)),
             ipv6_ext_community_raw: None, // TODO
         }
@@ -540,7 +540,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::large_communities::large_community
     fn new(_instance: &'a Instance, comms: &Self::ListEntry) -> Self {
         let communities = comms.value.0.iter().map(|c| c.to_yang());
         Self {
-            index: comms.index,
+            index: comms.index.get(),
             large_community: Some(Box::new(communities)),
         }
     }
@@ -582,10 +582,10 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
             prefix: *prefix,
             origin: route.origin.to_yang(),
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
             eligible_route: None,
             ineligible_reason: None,
@@ -600,7 +600,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
 
     fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -651,14 +651,14 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
         Self {
             prefix: *prefix,
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
-            eligible_route: Some(route.is_eligible()),
-            ineligible_reason: route.ineligible_reason.as_ref().map(|r| r.to_yang()),
-            reject_reason: route.reject_reason.as_ref().map(|r| r.to_yang()),
+            eligible_route: Some(true),
+            ineligible_reason: None,
+            reject_reason: None,
         }
     }
 }
@@ -669,7 +669,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
 
     fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -688,39 +688,39 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
 
 impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast::neighbors::neighbor::adj_rib_in_post::routes::route::Route<'a> {
     type ParentListEntry = &'a Neighbor;
-    type ListEntry = (Ipv4Network, &'a Route);
+    type ListEntry = (Ipv4Network, &'a Route, &'a SelectionState);
 
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv4_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.in_post()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.in_post()).map(|(route, sel)| (prefix, route, sel)));
         Some(iter)
     }
 
-    fn new(_instance: &'a Instance, (prefix, route): &Self::ListEntry) -> Self {
+    fn new(_instance: &'a Instance, (prefix, route, selection): &Self::ListEntry) -> Self {
         Self {
             prefix: *prefix,
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
-            eligible_route: Some(route.is_eligible()),
-            ineligible_reason: route.ineligible_reason.as_ref().map(|r| r.to_yang()),
+            eligible_route: Some(selection.is_eligible()),
+            ineligible_reason: selection.ineligible_reason.as_ref().map(|r| r.to_yang()),
             best_path: None, // TODO
-            reject_reason: route.reject_reason.as_ref().map(|r| r.to_yang()),
+            reject_reason: selection.reject_reason.as_ref().map(|r| r.to_yang()),
         }
     }
 }
 
 impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast::neighbors::neighbor::adj_rib_in_post::routes::route::unknown_attributes::unknown_attribute::UnknownAttribute<'a> {
-    type ParentListEntry = (Ipv4Network, &'a Route);
+    type ParentListEntry = (Ipv4Network, &'a Route, &'a SelectionState);
     type ListEntry = &'a UnknownAttr;
 
-    fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
+    fn iter(_instance: &'a Instance, (_, route, _): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -752,14 +752,14 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
         Self {
             prefix: *prefix,
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
-            eligible_route: Some(route.is_eligible()),
-            ineligible_reason: route.ineligible_reason.as_ref().map(|r| r.to_yang()),
-            reject_reason: route.reject_reason.as_ref().map(|r| r.to_yang()),
+            eligible_route: Some(true),
+            ineligible_reason: None,
+            reject_reason: None,
         }
     }
 }
@@ -770,7 +770,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
 
     fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -802,14 +802,14 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
         Self {
             prefix: *prefix,
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
-            eligible_route: Some(route.is_eligible()),
-            ineligible_reason: route.ineligible_reason.as_ref().map(|r| r.to_yang()),
-            reject_reason: route.reject_reason.as_ref().map(|r| r.to_yang()),
+            eligible_route: Some(true),
+            ineligible_reason: None,
+            reject_reason: None,
         }
     }
 }
@@ -820,7 +820,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
 
     fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -856,10 +856,10 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
             prefix: *prefix,
             origin: route.origin.to_yang(),
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
             eligible_route: None,
             ineligible_reason: None,
@@ -874,7 +874,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
 
     fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -925,14 +925,14 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
         Self {
             prefix: *prefix,
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
-            eligible_route: Some(route.is_eligible()),
-            ineligible_reason: route.ineligible_reason.as_ref().map(|r| r.to_yang()),
-            reject_reason: route.reject_reason.as_ref().map(|r| r.to_yang()),
+            eligible_route: Some(true),
+            ineligible_reason: None,
+            reject_reason: None,
         }
     }
 }
@@ -943,7 +943,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
 
     fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -962,39 +962,39 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
 
 impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast::neighbors::neighbor::adj_rib_in_post::routes::route::Route<'a> {
     type ParentListEntry = &'a Neighbor;
-    type ListEntry = (Ipv6Network, &'a Route);
+    type ListEntry = (Ipv6Network, &'a Route, &'a SelectionState);
 
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv6_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.in_post()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.in_post()).map(|(route, sel)| (prefix, route, sel)));
         Some(iter)
     }
 
-    fn new(_instance: &'a Instance, (prefix, route): &Self::ListEntry) -> Self {
+    fn new(_instance: &'a Instance, (prefix, route, selection): &Self::ListEntry) -> Self {
         Self {
             prefix: *prefix,
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
-            eligible_route: Some(route.is_eligible()),
-            ineligible_reason: route.ineligible_reason.as_ref().map(|r| r.to_yang()),
+            eligible_route: Some(selection.is_eligible()),
+            ineligible_reason: selection.ineligible_reason.as_ref().map(|r| r.to_yang()),
             best_path: None, // TODO
-            reject_reason: route.reject_reason.as_ref().map(|r| r.to_yang()),
+            reject_reason: selection.reject_reason.as_ref().map(|r| r.to_yang()),
         }
     }
 }
 
 impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast::neighbors::neighbor::adj_rib_in_post::routes::route::unknown_attributes::unknown_attribute::UnknownAttribute<'a> {
-    type ParentListEntry = (Ipv6Network, &'a Route);
+    type ParentListEntry = (Ipv6Network, &'a Route, &'a SelectionState);
     type ListEntry = &'a UnknownAttr;
 
-    fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
+    fn iter(_instance: &'a Instance, (_, route, _): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -1026,14 +1026,14 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
         Self {
             prefix: *prefix,
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
-            eligible_route: Some(route.is_eligible()),
-            ineligible_reason: route.ineligible_reason.as_ref().map(|r| r.to_yang()),
-            reject_reason: route.reject_reason.as_ref().map(|r| r.to_yang()),
+            eligible_route: Some(true),
+            ineligible_reason: None,
+            reject_reason: None,
         }
     }
 }
@@ -1044,7 +1044,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
 
     fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 
@@ -1076,14 +1076,14 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
         Self {
             prefix: *prefix,
             path_id: 0,
-            attr_index: Some(route.attrs.base.index),
-            community_index: route.attrs.comm.as_ref().map(|c| c.index),
-            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index),
-            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index),
+            attr_index: Some(route.attrs.base.index.get()),
+            community_index: route.attrs.comm.as_ref().map(|c| c.index.get()),
+            ext_community_index: route.attrs.ext_comm.as_ref().map(|c| c.index.get()),
+            large_community_index: route.attrs.large_comm.as_ref().map(|c| c.index.get()),
             last_modified: Some(Timeticks(route.last_modified)).ignore_in_testing(),
-            eligible_route: Some(route.is_eligible()),
-            ineligible_reason: route.ineligible_reason.as_ref().map(|r| r.to_yang()),
-            reject_reason: route.reject_reason.as_ref().map(|r| r.to_yang()),
+            eligible_route: Some(true),
+            ineligible_reason: None,
+            reject_reason: None,
         }
     }
 }
@@ -1094,7 +1094,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
 
     fn iter(_instance: &'a Instance, (_, route): &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let unknown = route.attrs.unknown.as_ref()?;
-        let iter = unknown.iter();
+        let iter = unknown.value.iter();
         Some(iter)
     }
 

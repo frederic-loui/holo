@@ -63,7 +63,7 @@ pub struct BaseAttrs {
 
 // BGP Path Attribute Flags.
 bitflags! {
-    #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
     #[derive(Deserialize, Serialize)]
     #[serde(transparent)]
     pub struct AttrFlags: u8 {
@@ -128,7 +128,7 @@ pub trait CommType:
     fn decode(buf: &mut Bytes) -> Result<Self, AttrError>;
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[derive(new)]
 #[derive(Deserialize, Serialize)]
 pub struct UnknownAttr {

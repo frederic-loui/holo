@@ -36,7 +36,7 @@ use crate::packet::message::{
     Capability, DecodeCxt, EncodeCxt, KeepaliveMsg, Message,
     NegotiatedCapability, NotificationMsg, OpenMsg, RouteRefreshMsg,
 };
-use crate::rib::{Rib, Route, RouteOrigin};
+use crate::rib::{BestRoute, Rib, RouteOrigin};
 #[cfg(feature = "testing")]
 use crate::tasks::messages::ProtocolOutputMsg;
 use crate::tasks::messages::input::{NbrTimerMsg, TcpConnectMsg};
@@ -974,14 +974,12 @@ impl Neighbor {
             .iter()
             .filter_map(|(prefix, dest)| {
                 dest.local.as_ref().map(|route| {
-                    let route = Route {
+                    let route = BestRoute {
                         origin: route.origin,
-                        attrs: route.attrs.clone(),
                         route_type: route.route_type,
-                        igp_cost: None,
+                        attrs: route.attrs.clone(),
                         last_modified: route.last_modified,
-                        ineligible_reason: None,
-                        reject_reason: None,
+                        igp_cost: None,
                     };
                     (prefix, Box::new(route))
                 })
@@ -1009,10 +1007,11 @@ impl Neighbor {
     {
         let table = A::table(&mut instance.state.rib.tables);
         for (prefix, dest) in &table.prefixes {
-            let Some(adj_rib) = dest.adj_rib.get(&self.index) else {
-                continue;
-            };
-            let Some(route) = adj_rib.out_post() else {
+            let Some(route) = dest
+                .adj_rib
+                .get(&self.index)
+                .and_then(|adj_rib| adj_rib.out_post())
+            else {
                 continue;
             };
 
@@ -1032,19 +1031,13 @@ impl Neighbor {
         A: AddressFamily,
     {
         let table = A::table(&mut rib.tables);
+        let nht = &mut table.nht;
         for (prefix, dest) in table.prefixes.iter_mut() {
-            // Clear the Adj-RIB-In and Adj-RIB-Out. Dropping the removed entry
-            // releases its routes; the attribute sets are reclaimed by the
-            // next decision process sweep.
+            // Clear the Adj-RIB-In and Adj-RIB-Out.
             if let Some(adj_rib) = dest.adj_rib.remove(&self.index) {
                 // Update nexthop tracking.
-                if let Some(adj_in_route) = adj_rib.in_post() {
-                    rib::nexthop_untrack(
-                        &mut table.nht,
-                        &prefix,
-                        adj_in_route,
-                        ibus_tx,
-                    );
+                if let Some((route, _)) = adj_rib.in_post() {
+                    rib::nexthop_untrack(nht, &prefix, route, ibus_tx);
                 }
             }
 
@@ -1111,7 +1104,7 @@ impl Neighbor {
     }
 
     // Determines whether the given route is eligible for distribution.
-    pub(crate) fn distribute_filter(&self, route: &Route) -> bool {
+    pub(crate) fn distribute_filter(&self, route: &BestRoute) -> bool {
         // Suppress advertisements to peers if their AS number is present
         // in the AS path of the route, unless overridden by configuration.
         if !self.config.as_path_options.disable_peer_as_filter

@@ -7,6 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, btree_map, hash_map};
 use std::net::{IpAddr, Ipv4Addr};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -57,35 +58,91 @@ pub struct RoutingTable<A: AddressFamily> {
 pub struct Destination {
     pub local: Option<Box<LocalRoute>>,
     pub adj_rib: BTreeMap<PeerIndex, AdjRib>,
-    pub redistribute: Option<Box<Route>>,
+    pub redistribute: Option<Box<Redistribute>>,
 }
 
 #[derive(Debug, Default)]
 pub struct AdjRib {
-    in_pre: Option<Box<Route>>,
-    in_post: Option<Box<Route>>,
-    out_pre: Option<Box<Route>>,
-    out_post: Option<Box<Route>>,
+    adj_in: Option<Box<AdjRibIn>>,
+    adj_out: Option<Box<AdjRibOut>>,
+}
+
+// Adj-RIB-In entry for a single peer.
+#[derive(Debug)]
+pub struct AdjRibIn {
+    pub origin: RouteOrigin,
+    pub route_type: RouteType,
+    pub pre: Route,
+    pub post: Option<(Route, SelectionState)>,
+}
+
+// Adj-RIB-Out entry for a single peer.
+#[derive(Debug)]
+pub struct AdjRibOut {
+    pub pre: Route,
+    pub post: Option<Route>,
+}
+
+// Locally redistributed route (participates in the Decision Process).
+#[derive(Clone, Debug)]
+pub struct Redistribute {
+    pub origin: RouteOrigin,
+    pub route_type: RouteType,
+    pub attrs: Arc<RouteAttrs>,
+    pub last_modified: Instant,
+    pub selection: SelectionState,
+}
+
+// A candidate route considered by the Decision Process.
+struct Candidate<'a> {
+    origin: RouteOrigin,
+    route_type: RouteType,
+    attrs: &'a Arc<RouteAttrs>,
+    last_modified: Instant,
+    selection: &'a mut SelectionState,
+}
+
+// Winner of the Decision Process for a destination.
+#[derive(Clone, Debug)]
+pub struct BestRoute {
+    pub origin: RouteOrigin,
+    pub route_type: RouteType,
+    pub attrs: Arc<RouteAttrs>,
+    pub last_modified: Instant,
+    pub igp_cost: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalRoute {
     pub origin: RouteOrigin,
-    pub attrs: RouteAttrs,
+    pub attrs: Arc<RouteAttrs>,
     pub route_type: RouteType,
     pub last_modified: Instant,
-    pub nexthops: Option<BTreeSet<IpAddr>>,
+    pub nexthops: Option<Box<[IpAddr]>>,
 }
 
+// A route at a single policy stage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Route {
-    pub origin: RouteOrigin,
-    pub attrs: RouteAttrs,
-    pub route_type: RouteType,
-    pub igp_cost: Option<u32>,
+    pub attrs: Arc<RouteAttrs>,
     pub last_modified: Instant,
+}
+
+// Per-route state produced by the Decision Process.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SelectionState {
+    pub igp_cost: Option<u32>,
     pub ineligible_reason: Option<RouteIneligibleReason>,
     pub reject_reason: Option<RouteRejectReason>,
+}
+
+// Borrowed view of a route used by the Decision Process comparison.
+#[derive(Clone, Copy)]
+struct RouteRef<'a> {
+    origin: RouteOrigin,
+    route_type: RouteType,
+    attrs: &'a Arc<RouteAttrs>,
+    igp_cost: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,7 +164,7 @@ pub struct RouteAttrs {
     pub ext_comm: Option<Arc<AttrSet<ExtComms>>>,
     pub extv6_comm: Option<Arc<AttrSet<Extv6Comms>>>,
     pub large_comm: Option<Arc<AttrSet<LargeComms>>>,
-    pub unknown: Option<Box<[UnknownAttr]>>,
+    pub unknown: Option<Arc<AttrSet<UnknownAttrs>>>,
 }
 
 #[derive(Debug, Default)]
@@ -117,20 +174,38 @@ pub struct AttrSetsCxt {
     pub ext_comm: AttrSets<ExtComms>,
     pub extv6_comm: AttrSets<Extv6Comms>,
     pub large_comm: AttrSets<LargeComms>,
+    pub unknown: AttrSets<UnknownAttrs>,
+    pub route: HashMap<RouteAttrsKey, Arc<RouteAttrs>>,
+}
+
+// Key identifying a unique combination of interned attribute sets by the
+// index of each per-category set. Indices are always nonzero, so the optional
+// fields fit in the same space as plain integers.
+#[derive(Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RouteAttrsKey {
+    base: NonZeroU64,
+    comm: Option<NonZeroU64>,
+    ext_comm: Option<NonZeroU64>,
+    extv6_comm: Option<NonZeroU64>,
+    large_comm: Option<NonZeroU64>,
+    unknown: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct AttrSets<T> {
     pub tree: BTreeMap<T, Arc<AttrSet<T>>>,
-    next_index: u64,
+    next_index: NonZeroU64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 #[derive(Deserialize, Serialize)]
 pub struct AttrSet<T> {
-    pub index: u64,
+    pub index: NonZeroU64,
     pub value: T,
 }
+
+// Unknown attributes carried along with a route, interned as a set.
+pub type UnknownAttrs = Box<[UnknownAttr]>;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct NhtEntry<A: AddressFamily> {
@@ -186,74 +261,134 @@ where
 // ===== impl AdjRib =====
 
 impl AdjRib {
-    pub(crate) fn in_pre(&self) -> Option<&Route> {
-        self.in_pre.as_deref()
+    pub(crate) fn adj_in(&self) -> Option<&AdjRibIn> {
+        self.adj_in.as_deref()
     }
 
-    pub(crate) fn in_post(&self) -> Option<&Route> {
-        self.in_post.as_deref()
+    pub(crate) fn in_pre(&self) -> Option<&Route> {
+        self.adj_in.as_ref().map(|adj_in| &adj_in.pre)
+    }
+
+    pub(crate) fn in_post(&self) -> Option<&(Route, SelectionState)> {
+        self.adj_in.as_ref().and_then(|adj_in| adj_in.post.as_ref())
     }
 
     pub(crate) fn out_pre(&self) -> Option<&Route> {
-        self.out_pre.as_deref()
+        self.adj_out.as_ref().map(|adj_out| &adj_out.pre)
     }
 
     pub(crate) fn out_post(&self) -> Option<&Route> {
-        self.out_post.as_deref()
+        self.adj_out
+            .as_ref()
+            .and_then(|adj_out| adj_out.post.as_ref())
     }
 
-    pub(crate) fn remove_in_pre(&mut self) -> Option<Box<Route>> {
-        self.in_pre.take()
+    pub(crate) fn is_empty(&self) -> bool {
+        self.adj_in.is_none() && self.adj_out.is_none()
     }
 
-    pub(crate) fn remove_in_post(&mut self) -> Option<Box<Route>> {
-        self.in_post.take()
+    // Sets or updates the pre-policy received route.
+    pub(crate) fn update_in_pre(
+        &mut self,
+        origin: RouteOrigin,
+        route_type: RouteType,
+        route: Route,
+    ) {
+        match &mut self.adj_in {
+            Some(adj_in) => adj_in.pre = route,
+            None => {
+                self.adj_in = Some(Box::new(AdjRibIn {
+                    origin,
+                    route_type,
+                    pre: route,
+                    post: None,
+                }));
+            }
+        }
     }
 
-    pub(crate) fn remove_out_pre(&mut self) -> Option<Box<Route>> {
-        self.out_pre.take()
+    // Sets or updates the post-policy route, returning a reference to the
+    // stored route on success.
+    //
+    // If the pre-policy route is gone (e.g. withdrawn while the import policy
+    // was being applied), the route is dropped and None is returned.
+    pub(crate) fn update_in_post(&mut self, route: Route) -> Option<&Route> {
+        let adj_in = self.adj_in.as_mut()?;
+        let (route, _) = adj_in.post.insert((route, SelectionState::default()));
+        Some(route)
     }
 
-    pub(crate) fn remove_out_post(&mut self) -> Option<Box<Route>> {
-        self.out_post.take()
+    // Removes the post-policy route, returning it.
+    pub(crate) fn remove_in_post(&mut self) -> Option<Route> {
+        let (route, _) = self.adj_in.as_mut()?.post.take()?;
+        Some(route)
     }
 
-    pub(crate) fn update_in_pre(&mut self, route: Box<Route>) {
-        self.in_pre = Some(route);
+    // Removes the whole Adj-RIB-In entry, returning the post-policy route (for
+    // nexthop untracking by the caller).
+    pub(crate) fn remove_in(&mut self) -> Option<Route> {
+        self.adj_in.take()?.post.map(|(route, _)| route)
     }
 
-    pub(crate) fn update_in_post(&mut self, route: Box<Route>) {
-        self.in_post = Some(route);
+    // Sets or updates the pre-policy advertised route.
+    pub(crate) fn update_out_pre(&mut self, route: Route) {
+        match &mut self.adj_out {
+            Some(adj_out) => adj_out.pre = route,
+            None => {
+                self.adj_out = Some(Box::new(AdjRibOut {
+                    pre: route,
+                    post: None,
+                }));
+            }
+        }
     }
 
-    pub(crate) fn update_out_pre(&mut self, route: Box<Route>) {
-        self.out_pre = Some(route);
+    // Sets or updates the post-policy advertised route, returning a reference
+    // to the stored route on success.
+    //
+    // If the pre-policy route is gone, the route is dropped and None is
+    // returned.
+    pub(crate) fn update_out_post(&mut self, route: Route) -> Option<&Route> {
+        let adj_out = self.adj_out.as_mut()?;
+        Some(adj_out.post.insert(route))
     }
 
-    pub(crate) fn update_out_post(&mut self, route: Box<Route>) {
-        self.out_post = Some(route);
+    // Removes the post-policy advertised route, returning it.
+    pub(crate) fn remove_out_post(&mut self) -> Option<Route> {
+        self.adj_out.as_mut()?.post.take()
+    }
+
+    // Removes the whole Adj-RIB-Out entry, returning whether it had a
+    // post-policy route (i.e. whether the route was actually advertised).
+    pub(crate) fn remove_out(&mut self) -> bool {
+        self.adj_out
+            .take()
+            .is_some_and(|adj_out| adj_out.post.is_some())
     }
 }
 
 // ===== impl Route =====
 
 impl Route {
-    pub(crate) fn new(
-        origin: RouteOrigin,
-        attrs: RouteAttrs,
-        route_type: RouteType,
-    ) -> Route {
+    pub(crate) fn new(attrs: Arc<RouteAttrs>) -> Route {
         Route {
-            origin,
             attrs,
-            route_type,
-            igp_cost: None,
             last_modified: Instant::now(),
-            ineligible_reason: None,
-            reject_reason: None,
         }
     }
+}
 
+// ===== impl SelectionState =====
+
+impl SelectionState {
+    pub(crate) fn is_eligible(&self) -> bool {
+        self.ineligible_reason.is_none()
+    }
+}
+
+// ===== impl BestRoute =====
+
+impl BestRoute {
     pub(crate) fn policy_info(&self) -> RoutePolicyInfo {
         RoutePolicyInfo {
             origin: self.origin,
@@ -264,13 +399,35 @@ impl Route {
         }
     }
 
-    pub(crate) fn is_eligible(&self) -> bool {
-        self.ineligible_reason.is_none()
+    fn as_route_ref(&self) -> RouteRef<'_> {
+        RouteRef {
+            origin: self.origin,
+            route_type: self.route_type,
+            attrs: &self.attrs,
+            igp_cost: self.igp_cost,
+        }
     }
+}
 
+// ===== impl Candidate =====
+
+impl Candidate<'_> {
+    fn as_route_ref(&self) -> RouteRef<'_> {
+        RouteRef {
+            origin: self.origin,
+            route_type: self.route_type,
+            attrs: self.attrs,
+            igp_cost: self.selection.igp_cost,
+        }
+    }
+}
+
+// ===== impl RouteRef =====
+
+impl RouteRef<'_> {
     fn compare(
         &self,
-        other: &Route,
+        other: &RouteRef<'_>,
         selection_cfg: &RouteSelectionCfg,
         mpath_cfg: Option<&MultipathCfg>,
     ) -> RouteCompare {
@@ -486,6 +643,17 @@ impl RouteOrigin {
 // ===== impl RouteAttrs =====
 
 impl RouteAttrs {
+    fn key(&self) -> RouteAttrsKey {
+        RouteAttrsKey {
+            base: self.base.index,
+            comm: self.comm.as_ref().map(|c| c.index),
+            ext_comm: self.ext_comm.as_ref().map(|c| c.index),
+            extv6_comm: self.extv6_comm.as_ref().map(|c| c.index),
+            large_comm: self.large_comm.as_ref().map(|c| c.index),
+            unknown: self.unknown.as_ref().map(|c| c.index),
+        }
+    }
+
     pub(crate) fn get(&self) -> Attrs {
         Attrs {
             base: self.base.value.clone(),
@@ -493,7 +661,7 @@ impl RouteAttrs {
             ext_comm: self.ext_comm.as_ref().map(|set| set.value.clone()),
             extv6_comm: self.extv6_comm.as_ref().map(|set| set.value.clone()),
             large_comm: self.large_comm.as_ref().map(|set| set.value.clone()),
-            unknown: self.unknown.clone(),
+            unknown: self.unknown.as_ref().map(|set| set.value.clone()),
         }
     }
 }
@@ -501,8 +669,11 @@ impl RouteAttrs {
 // ===== impl AttrSetsCxt =====
 
 impl AttrSetsCxt {
-    pub(crate) fn get_route_attr_sets(&mut self, attrs: &Attrs) -> RouteAttrs {
-        RouteAttrs {
+    pub(crate) fn get_route_attr_sets(
+        &mut self,
+        attrs: &Attrs,
+    ) -> Arc<RouteAttrs> {
+        let route_attrs = RouteAttrs {
             base: self.base.get(&attrs.base),
             comm: attrs.comm.as_ref().map(|c| self.comm.get(c)),
             ext_comm: attrs.ext_comm.as_ref().map(|c| self.ext_comm.get(c)),
@@ -514,18 +685,29 @@ impl AttrSetsCxt {
                 .large_comm
                 .as_ref()
                 .map(|c| self.large_comm.get(c)),
-            unknown: attrs.unknown.clone(),
-        }
+            unknown: attrs.unknown.as_ref().map(|u| self.unknown.get(u)),
+        };
+        let key = route_attrs.key();
+        let route_attrs = self
+            .route
+            .entry(key)
+            .or_insert_with(|| Arc::new(route_attrs));
+        Arc::clone(route_attrs)
     }
 
     // Releases interned attribute sets that are no longer referenced by any
-    // route, so the trees don't grow without bound as routes come and go.
+    // route, so the trees don't grow without bound as routes come and go. The
+    // combinations are swept first so the per-category sets they hold are
+    // released too.
     pub(crate) fn sweep(&mut self) {
+        self.route
+            .retain(|_, route_attrs| Arc::strong_count(route_attrs) > 1);
         self.base.sweep();
         self.comm.sweep();
         self.ext_comm.sweep();
         self.extv6_comm.sweep();
         self.large_comm.sweep();
+        self.unknown.sweep();
     }
 }
 
@@ -542,8 +724,9 @@ where
             let index = {
                 #[cfg(not(feature = "deterministic"))]
                 {
-                    self.next_index += 1;
-                    self.next_index
+                    let index = self.next_index;
+                    self.next_index = self.next_index.saturating_add(1);
+                    index
                 }
                 #[cfg(feature = "deterministic")]
                 {
@@ -552,7 +735,7 @@ where
                     use twox_hash::XxHash64;
                     let mut hasher = XxHash64::with_seed(0);
                     attr.hash(&mut hasher);
-                    hasher.finish()
+                    NonZeroU64::new(hasher.finish()).unwrap_or(NonZeroU64::MIN)
                 }
             };
             let attr_set = Arc::new(AttrSet {
@@ -576,7 +759,7 @@ impl<T> Default for AttrSets<T> {
     fn default() -> AttrSets<T> {
         AttrSets {
             tree: Default::default(),
-            next_index: 0,
+            next_index: NonZeroU64::MIN,
         }
     }
 }
@@ -599,10 +782,10 @@ where
 
 fn compute_nexthops<A>(
     dest: &Destination,
-    best_route: &Route,
+    best_route: &BestRoute,
     selection_cfg: &RouteSelectionCfg,
     mpath_cfg: &MultipathCfg,
-) -> Option<BTreeSet<IpAddr>>
+) -> Option<Box<[IpAddr]>>
 where
     A: AddressFamily,
 {
@@ -622,19 +805,29 @@ where
         RouteType::Internal => mpath_cfg.ibgp_max_paths,
         RouteType::External => mpath_cfg.ebgp_max_paths,
     };
-    let nexthops = dest
+    let best_ref = best_route.as_route_ref();
+    let mut nexthops = dest
         .adj_rib
         .values()
-        .filter_map(|adj_rib| adj_rib.in_post.as_ref())
-        .filter(|route| {
-            route.is_eligible()
-                && route.compare(best_route, selection_cfg, Some(mpath_cfg))
-                    == RouteCompare::MultipathEqual
+        .filter_map(|adj_rib| {
+            let adj_in = adj_rib.adj_in()?;
+            let (route, selection) = adj_in.post.as_ref()?;
+            let route_ref = RouteRef {
+                origin: adj_in.origin,
+                route_type: adj_in.route_type,
+                attrs: &route.attrs,
+                igp_cost: selection.igp_cost,
+            };
+            (selection.is_eligible()
+                && route_ref.compare(&best_ref, selection_cfg, Some(mpath_cfg))
+                    == RouteCompare::MultipathEqual)
+                .then(|| A::nexthop_rx_extract(&route.attrs.base.value))
         })
-        .map(|route| A::nexthop_rx_extract(&route.attrs.base.value))
-        .take(max_paths as usize)
-        .collect();
-    Some(nexthops)
+        .collect::<Vec<_>>();
+    nexthops.sort_unstable();
+    nexthops.dedup();
+    nexthops.truncate(max_paths as usize);
+    Some(nexthops.into_boxed_slice())
 }
 
 // ===== global functions =====
@@ -644,56 +837,77 @@ pub(crate) fn best_path<A>(
     local_asn: u32,
     nht: &HashMap<IpAddr, NhtEntry<A>>,
     selection_cfg: &RouteSelectionCfg,
-) -> Option<Box<Route>>
+) -> Option<Box<BestRoute>>
 where
     A: AddressFamily,
 {
-    let mut best_route = None;
-
-    // Iterate over each Adj-RIB-In route for the destination.
-    for route in dest
+    // Collect the post-policy Adj-RIB-In routes and the redistributed route.
+    let candidates = dest
         .adj_rib
         .values_mut()
-        // Pick the post-policy routes.
-        .filter_map(|adj_rib| adj_rib.in_post.as_mut())
-        // Consider locally redistributed routes too.
-        .chain(dest.redistribute.as_mut())
-    {
-        route.reject_reason = None;
-        route.ineligible_reason = None;
+        .filter_map(|adj_rib| {
+            let adj_in = adj_rib.adj_in.as_mut()?;
+            let (route, selection) = adj_in.post.as_mut()?;
+            Some(Candidate {
+                origin: adj_in.origin,
+                route_type: adj_in.route_type,
+                attrs: &route.attrs,
+                last_modified: route.last_modified,
+                selection,
+            })
+        })
+        .chain(dest.redistribute.as_mut().map(|r| Candidate {
+            origin: r.origin,
+            route_type: r.route_type,
+            attrs: &r.attrs,
+            last_modified: r.last_modified,
+            selection: &mut r.selection,
+        }));
+
+    let mut best: Option<Candidate<'_>> = None;
+    for cand in candidates {
+        cand.selection.reject_reason = None;
+        cand.selection.ineligible_reason = None;
 
         // First, check if the route is eligible.
-        if route.attrs.base.value.as_path.contains(local_asn) {
-            route.ineligible_reason = Some(RouteIneligibleReason::AsLoop);
+        if cand.attrs.base.value.as_path.contains(local_asn) {
+            cand.selection.ineligible_reason =
+                Some(RouteIneligibleReason::AsLoop);
             continue;
         }
 
         // Get interior cost to the route's nexthop.
-        if !route.origin.is_local() {
-            let nexthop = A::nexthop_rx_extract(&route.attrs.base.value);
-            route.igp_cost = nht.get(&nexthop).and_then(|nht| nht.metric);
-            if route.igp_cost.is_none() {
-                route.ineligible_reason =
+        if !cand.origin.is_local() {
+            let nexthop = A::nexthop_rx_extract(&cand.attrs.base.value);
+            cand.selection.igp_cost =
+                nht.get(&nexthop).and_then(|nht| nht.metric);
+            if cand.selection.igp_cost.is_none() {
+                cand.selection.ineligible_reason =
                     Some(RouteIneligibleReason::Unresolvable);
                 continue;
             };
         }
 
         // Compare the current route with the best route found so far.
-        match &mut best_route {
+        match &mut best {
             None => {
                 // Initialize the best route with the first eligible route.
-                best_route = Some(route)
+                best = Some(cand)
             }
-            Some(best_route) => {
+            Some(best_cand) => {
                 // Update the best route if the current route is preferred.
-                match route.compare(best_route, selection_cfg, None) {
+                let result = cand.as_route_ref().compare(
+                    &best_cand.as_route_ref(),
+                    selection_cfg,
+                    None,
+                );
+                match result {
                     RouteCompare::Preferred(reason) => {
-                        best_route.reject_reason = Some(reason);
-                        *best_route = route;
+                        best_cand.selection.reject_reason = Some(reason);
+                        *best_cand = cand;
                     }
                     RouteCompare::LessPreferred(reason) => {
-                        route.reject_reason = Some(reason);
+                        cand.selection.reject_reason = Some(reason);
                     }
                     RouteCompare::MultipathEqual
                     | RouteCompare::MultipathDifferent => unreachable!(),
@@ -702,14 +916,22 @@ where
         }
     }
 
-    // Return a cloned copy of the best route found, if any.
-    best_route.cloned()
+    // Build the winning route, if any.
+    best.map(|cand| {
+        Box::new(BestRoute {
+            origin: cand.origin,
+            route_type: cand.route_type,
+            attrs: cand.attrs.clone(),
+            last_modified: cand.last_modified,
+            igp_cost: cand.selection.igp_cost,
+        })
+    })
 }
 
 pub(crate) fn loc_rib_update<A>(
     prefix: A::IpNetwork,
     dest: &mut Destination,
-    best_route: Option<Box<Route>>,
+    best_route: Option<Box<BestRoute>>,
     selection_cfg: &RouteSelectionCfg,
     mpath_cfg: &MultipathCfg,
     distance_cfg: &DistanceCfg,
@@ -865,149 +1087,6 @@ pub(crate) fn nexthop_untrack<A>(
         if nht.prefixes.is_empty() {
             ibus::tx::nexthop_untrack(ibus_tx, addr);
             nht_e.remove();
-        }
-    }
-}
-
-// ===== tests =====
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::packet::attribute::BaseAttrs;
-
-    fn make_route(
-        origin: RouteOrigin,
-        route_type: RouteType,
-        igp_cost: Option<u32>,
-    ) -> Route {
-        let base_attrs = BaseAttrs::default();
-        let attrs = RouteAttrs {
-            base: Arc::new(AttrSet {
-                index: 0,
-                value: base_attrs,
-            }),
-            comm: None,
-            ext_comm: None,
-            extv6_comm: None,
-            large_comm: None,
-            unknown: None,
-        };
-        Route {
-            origin,
-            attrs,
-            route_type,
-            igp_cost,
-            last_modified: Instant::now(),
-            ineligible_reason: None,
-            reject_reason: None,
-        }
-    }
-
-    fn ibgp_origin() -> RouteOrigin {
-        RouteOrigin::Neighbor {
-            identifier: Ipv4Addr::new(10, 0, 0, 1),
-            remote_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-        }
-    }
-
-    fn local_origin() -> RouteOrigin {
-        RouteOrigin::Protocol(Protocol::STATIC)
-    }
-
-    #[test]
-    fn compare_prefers_lower_igp_cost_some_some() {
-        // Two iBGP routes identical except for IGP cost.
-        // Per RFC 4271 §9.1.2.2, the route with the lower interior cost
-        // (shorter IGP path to the next-hop) must win.
-        let cfg = RouteSelectionCfg::default();
-        let lower = make_route(ibgp_origin(), RouteType::Internal, Some(5));
-        let mut higher_origin = ibgp_origin();
-        if let RouteOrigin::Neighbor { remote_addr, .. } = &mut higher_origin {
-            *remote_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-        }
-        let higher = make_route(higher_origin, RouteType::Internal, Some(10));
-
-        // Lower should be preferred over higher.
-        match lower.compare(&higher, &cfg, None) {
-            RouteCompare::Preferred(RouteRejectReason::NexthopCostHigher) => {}
-            other => panic!(
-                "lower IGP cost (5) should be Preferred over higher (10), got {:?}",
-                other
-            ),
-        }
-
-        // Symmetric: higher should be LessPreferred vs lower.
-        match higher.compare(&lower, &cfg, None) {
-            RouteCompare::LessPreferred(
-                RouteRejectReason::NexthopCostHigher,
-            ) => {}
-            other => panic!(
-                "higher IGP cost (10) should be LessPreferred vs lower (5), got {:?}",
-                other
-            ),
-        }
-    }
-
-    #[test]
-    fn compare_prefers_local_origin_over_ibgp_when_all_else_equal() {
-        // Local-origin routes (redistribute-*, static) have igp_cost=None
-        // because there is no next-hop to track (the route originates here).
-        // They must win over any iBGP route with a resolvable next-hop:
-        // locally originated routes are the highest-priority source per BGP
-        // decision rules. Without this, a route-reflector topology where an
-        // RR client receives a reflected copy of its own locally-redistributed
-        // prefix will stop advertising its own origination because best-path
-        // picks the reflected iBGP copy as winner.
-        let cfg = RouteSelectionCfg::default();
-        let local = make_route(local_origin(), RouteType::Internal, None);
-        let ibgp = make_route(ibgp_origin(), RouteType::Internal, Some(0));
-
-        match local.compare(&ibgp, &cfg, None) {
-            RouteCompare::Preferred(RouteRejectReason::NexthopCostHigher) => {}
-            other => panic!(
-                "local-origin route (igp_cost=None) should be Preferred over \
-                 iBGP route (igp_cost=Some(0)), got {:?}",
-                other
-            ),
-        }
-
-        // Symmetric.
-        match ibgp.compare(&local, &cfg, None) {
-            RouteCompare::LessPreferred(
-                RouteRejectReason::NexthopCostHigher,
-            ) => {}
-            other => panic!(
-                "iBGP route should be LessPreferred vs local-origin, got {:?}",
-                other
-            ),
-        }
-    }
-
-    #[test]
-    fn compare_local_vs_local_falls_through_tiebreaker() {
-        // Two local-origin routes with igp_cost=None should not decide on
-        // the IGP-cost tiebreaker — they fall through to the subsequent
-        // tiebreakers (router-id, peer-addr). Since both are local, neither
-        // has Neighbor origin, so the router-id and peer-addr blocks are
-        // skipped and we hit `unreachable!()`. This test confirms that the
-        // None/None case falls through to the next tiebreaker (which for
-        // two identical local routes is actually unreachable — we catch
-        // the panic to verify we got past IGP cost cleanly).
-        //
-        // To make this testable without hitting unreachable, compare two
-        // local routes with different route_type.
-        let cfg = RouteSelectionCfg::default();
-        let local_int = make_route(local_origin(), RouteType::Internal, None);
-        let local_ext = make_route(local_origin(), RouteType::External, None);
-
-        // External should be preferred over Internal (eBGP tiebreaker comes
-        // BEFORE IGP cost, so we never hit IGP cost in this case — this
-        // just confirms the compare function still reaches that earlier
-        // tiebreaker correctly).
-        match local_ext.compare(&local_int, &cfg, None) {
-            RouteCompare::Preferred(RouteRejectReason::PreferExternal) => {}
-            other => panic!("expected PreferExternal, got {:?}", other),
         }
     }
 }

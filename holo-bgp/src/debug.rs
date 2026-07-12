@@ -14,7 +14,7 @@ use crate::neighbor::fsm;
 use crate::packet::error::AttrError;
 use crate::packet::iana::AttrType;
 use crate::packet::message::Message;
-use crate::rib::Route;
+use crate::rib::BestRoute;
 
 // BGP debug messages.
 #[derive(Debug)]
@@ -28,7 +28,7 @@ pub enum Debug<'a> {
     NbrMsgRx(&'a IpAddr, &'a Message),
     NbrMsgTx(&'a IpAddr, &'a Message),
     NbrAttrError(AttrType, AttrError),
-    BestPathFound(IpNetwork, &'a Route),
+    BestPathFound(IpNetwork, &'a BestRoute),
     BestPathNotFound(IpNetwork),
     NhtUpdate(IpAddr, Option<u32>),
     IbusRx(&'a IbusMsg),
