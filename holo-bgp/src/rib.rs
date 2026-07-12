@@ -776,10 +776,12 @@ pub(crate) fn loc_rib_update<A>(
     }
 }
 
-pub(crate) fn attrs_tx_update<A>(
+// Updates route attributes before they are added to the neighbor's pre-policy
+// Adj-RIB-Out. Export policies operate on the result of these updates and may
+// overwrite any of them.
+pub(crate) fn attrs_export_update<A>(
     attrs: &mut Attrs,
     nbr: &Neighbor,
-    local_asn: u32,
     local: bool,
 ) where
     A: AddressFamily,
@@ -792,9 +794,6 @@ pub(crate) fn attrs_tx_update<A>(
             }
         }
         PeerType::External => {
-            // Prepend local AS number.
-            attrs.base.as_path.prepend(local_asn);
-
             // Do not propagate the MULTI_EXIT_DISC attribute.
             attrs.base.med = None;
 
@@ -805,6 +804,23 @@ pub(crate) fn attrs_tx_update<A>(
 
     // Update the next-hop attribute based on the address family if necessary.
     A::nexthop_tx_change(nbr, local, &mut attrs.base);
+}
+
+// Updates route attributes at transmission time, after export policies were
+// applied. These updates are mandatory and can't be overwritten by policies.
+pub(crate) fn attrs_tx_update(
+    attrs: &mut Attrs,
+    nbr: &Neighbor,
+    local_asn: u32,
+) {
+    if let PeerType::External = nbr.peer_type {
+        // Prepend local AS number.
+        attrs.base.as_path.prepend(local_asn);
+
+        // Remove the LOCAL_PREF attribute in case an export policy has set
+        // it, as it can't be sent to external peers.
+        attrs.base.local_pref = None;
+    }
 }
 
 pub(crate) fn nexthop_track<A>(

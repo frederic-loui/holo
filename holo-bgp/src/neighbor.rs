@@ -994,6 +994,7 @@ impl Neighbor {
             self,
             table,
             routes,
+            &mut instance.state.rib.attr_sets,
             instance.shared,
             &instance.state.policy_apply_tasks,
         );
@@ -1017,12 +1018,7 @@ impl Neighbor {
 
             // Update route's attributes before transmission.
             let mut attrs = route.attrs.get();
-            rib::attrs_tx_update::<A>(
-                &mut attrs,
-                self,
-                instance.config.asn,
-                route.origin.is_local(),
-            );
+            rib::attrs_tx_update(&mut attrs, self, instance.config.asn);
 
             // Update neighbor's Tx queue.
             let update_queue = A::update_queue(&mut self.update_queues);

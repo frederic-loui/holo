@@ -27,7 +27,7 @@ use crate::packet::message::{
     Capability, Message, MpReachNlri, MpUnreachNlri, RouteRefreshMsg, UpdateMsg,
 };
 use crate::policy::RoutePolicyInfo;
-use crate::rib::{Rib, Route, RouteOrigin, RoutingTable};
+use crate::rib::{AttrSetsCxt, Rib, Route, RouteOrigin, RoutingTable};
 use crate::tasks::messages::output::PolicyApplyMsg;
 use crate::{network, rib};
 
@@ -562,12 +562,7 @@ where
 
                     // Update route's attributes before transmission.
                     let mut attrs = rpinfo.attrs;
-                    rib::attrs_tx_update::<A>(
-                        &mut attrs,
-                        nbr,
-                        instance.config.asn,
-                        rpinfo.origin.is_local(),
-                    );
+                    rib::attrs_tx_update(&mut attrs, nbr, instance.config.asn);
 
                     // Update neighbor's Tx queue.
                     let update_queue = A::update_queue(&mut nbr.update_queues);
@@ -747,6 +742,7 @@ where
                 nbr,
                 table,
                 nbr_reach,
+                &mut instance.state.rib.attr_sets,
                 instance.shared,
                 &instance.state.policy_apply_tasks,
             );
@@ -806,14 +802,20 @@ fn withdraw_routes<A>(
 pub(crate) fn advertise_routes<A>(
     nbr: &mut Neighbor,
     table: &mut RoutingTable<A>,
-    routes: Vec<(A::IpNetwork, Box<Route>)>,
+    mut routes: Vec<(A::IpNetwork, Box<Route>)>,
+    attr_sets: &mut AttrSetsCxt,
     shared: &InstanceShared,
     policy_apply_tasks: &PolicyApplyTasks,
 ) where
     A: AddressFamily,
 {
     // Update pre-policy Adj-RIB-Out routes.
-    for (prefix, route) in &routes {
+    for (prefix, route) in &mut routes {
+        // Update route's attributes before the export policies are applied.
+        let mut attrs = route.attrs.get();
+        rib::attrs_export_update::<A>(&mut attrs, nbr, route.origin.is_local());
+        route.attrs = attr_sets.get_route_attr_sets(&attrs);
+
         let dest = table.prefixes.get_mut(prefix).unwrap();
         let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
         adj_rib.update_out_pre(route.clone());
