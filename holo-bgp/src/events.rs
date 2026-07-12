@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::time::Instant;
 
@@ -785,12 +785,14 @@ where
         // Any routes that fail to meet the distribution criteria are marked
         // as unreachable to ensure previous advertisements are withdrawn.
         let mut nbr_unreach = unreach.clone();
-        let mut nbr_reach = reach.clone();
-        nbr_unreach.extend(
-            nbr_reach
-                .extract_if(.., |(_, route)| !nbr.distribute_filter(route))
-                .map(|(prefix, _)| prefix),
-        );
+        let mut nbr_reach = Vec::with_capacity(reach.len());
+        for (prefix, route) in &reach {
+            if nbr.distribute_filter(route) {
+                nbr_reach.push((*prefix, route.as_ref()));
+            } else {
+                nbr_unreach.push(*prefix);
+            }
+        }
 
         // Withdraw unfeasible routes immediately.
         if !nbr_unreach.is_empty() {
@@ -858,28 +860,13 @@ fn withdraw_routes<A>(
 pub(crate) fn advertise_routes<A>(
     nbr: &mut Neighbor,
     table: &mut RoutingTable<A>,
-    mut routes: Vec<(A::IpNetwork, Box<BestRoute>)>,
+    routes: Vec<(A::IpNetwork, &BestRoute)>,
     attr_sets: &mut AttrSetsCxt,
     shared: &InstanceShared,
     policy_apply_tasks: &PolicyApplyTasks,
 ) where
     A: AddressFamily,
 {
-    // Update pre-policy Adj-RIB-Out routes.
-    for (prefix, route) in &mut routes {
-        // Update route's attributes before the export policies are applied.
-        let mut attrs = route.attrs.get();
-        rib::attrs_export_update::<A>(&mut attrs, nbr, route.origin.is_local());
-        route.attrs = attr_sets.get_route_attr_sets(&attrs);
-
-        let dest = table.prefixes.get_mut(prefix).unwrap();
-        let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
-        adj_rib.update_out_pre(Route {
-            attrs: route.attrs.clone(),
-            last_modified: route.last_modified,
-        });
-    }
-
     // Get policy configuration for the address family.
     let apply_policy_cfg = &nbr
         .config
@@ -888,18 +875,48 @@ pub(crate) fn advertise_routes<A>(
         .map(|afi_safi| &afi_safi.apply_policy)
         .unwrap_or(&nbr.config.apply_policy);
 
-    // Enqueue export policy application, grouping prefixes whose routes
+    // Update pre-policy Adj-RIB-Out routes, grouping prefixes whose routes
     // share the same origin, type and interned attribute set so a single
     // route policy info is carried per distinct set.
+    let mut updated_attrs = HashMap::new();
     let mut groups: BTreeMap<_, (RoutePolicyInfo, Vec<IpNetwork>)> =
         BTreeMap::new();
     for (prefix, route) in routes {
-        let key = (route.origin, route.route_type, route.attrs.key());
-        let (_, prefixes) = groups
-            .entry(key)
-            .or_insert_with(|| (route.policy_info(), vec![]));
+        // Update route's attributes before the export policies are applied.
+        let local = route.origin.is_local();
+        let route_attrs = updated_attrs
+            .entry((route.attrs.key(), local))
+            .or_insert_with(|| {
+                let mut attrs = route.attrs.get();
+                rib::attrs_export_update::<A>(&mut attrs, nbr, local);
+                attr_sets.get_route_attr_sets(&attrs)
+            })
+            .clone();
+
+        // Store the route in the neighbor's pre-policy Adj-RIB-Out.
+        let dest = table.prefixes.get_mut(&prefix).unwrap();
+        let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
+        adj_rib.update_out_pre(Route {
+            attrs: route_attrs.clone(),
+            last_modified: route.last_modified,
+        });
+
+        // Add the prefix to the group matching the route's attribute set.
+        let key = (route.origin, route.route_type, route_attrs.key());
+        let (_, prefixes) = groups.entry(key).or_insert_with(|| {
+            let rpinfo = RoutePolicyInfo::new(
+                route.origin,
+                route.route_type,
+                None,
+                None,
+                route_attrs.get(),
+            );
+            (rpinfo, vec![])
+        });
         prefixes.push(prefix.into());
     }
+
+    // Enqueue export policy application, one message per group.
     for (route, prefixes) in groups.into_values() {
         let msg = PolicyApplyMsg::Neighbor {
             policy_type: PolicyType::Export,

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicU32};
@@ -987,7 +987,7 @@ impl Neighbor {
                         last_modified: route.last_modified,
                         igp_cost: None,
                     };
-                    (prefix, Box::new(route))
+                    (prefix, route)
                 })
             })
             .filter(|(_, route)| self.distribute_filter(route))
@@ -997,7 +997,10 @@ impl Neighbor {
         events::advertise_routes::<A>(
             self,
             table,
-            routes,
+            routes
+                .iter()
+                .map(|(prefix, route)| (*prefix, route))
+                .collect(),
             &mut instance.state.rib.attr_sets,
             instance.shared,
             &instance.state.policy_apply_tasks,
@@ -1012,6 +1015,10 @@ impl Neighbor {
         A: AddressFamily,
     {
         let table = A::table(&mut instance.state.rib.tables);
+
+        // Group prefixes whose routes share the same interned attribute set,
+        // updating the route's attributes once per distinct set.
+        let mut groups: HashMap<_, (Attrs, Vec<_>)> = HashMap::new();
         for (prefix, dest) in &table.prefixes {
             let Some(route) = dest
                 .adj_rib
@@ -1022,12 +1029,23 @@ impl Neighbor {
             };
 
             // Update route's attributes before transmission.
-            let mut attrs = route.attrs.get();
-            rib::attrs_tx_update(&mut attrs, self, instance.config.asn);
+            let (_, prefixes) =
+                groups.entry(route.attrs.key()).or_insert_with(|| {
+                    let mut attrs = route.attrs.get();
+                    rib::attrs_tx_update(&mut attrs, self, instance.config.asn);
+                    (attrs, vec![])
+                });
+            prefixes.push(prefix);
+        }
 
-            // Update neighbor's Tx queue.
-            let update_queue = A::update_queue(&mut self.update_queues);
-            update_queue.reach.entry(attrs).or_default().insert(prefix);
+        // Update neighbor's Tx queue.
+        let update_queue = A::update_queue(&mut self.update_queues);
+        for (attrs, prefixes) in groups.into_values() {
+            update_queue
+                .reach
+                .entry(attrs)
+                .or_default()
+                .extend(prefixes);
         }
     }
 

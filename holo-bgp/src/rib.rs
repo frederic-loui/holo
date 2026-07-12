@@ -27,7 +27,6 @@ use crate::northbound::configuration::{
 use crate::packet::attribute::{
     Attrs, BaseAttrs, Comms, ExtComms, Extv6Comms, LargeComms, UnknownAttr,
 };
-use crate::policy::RoutePolicyInfo;
 
 // Default values.
 pub const DFLT_LOCAL_PREF: u32 = 100;
@@ -425,16 +424,6 @@ impl SelectionState {
 // ===== impl BestRoute =====
 
 impl BestRoute {
-    pub(crate) fn policy_info(&self) -> RoutePolicyInfo {
-        RoutePolicyInfo {
-            origin: self.origin,
-            route_type: self.route_type,
-            tag: None,
-            opaque_attrs: None,
-            attrs: self.attrs.get(),
-        }
-    }
-
     fn as_route_ref(&self) -> RouteRef<'_> {
         RouteRef {
             origin: self.origin,
