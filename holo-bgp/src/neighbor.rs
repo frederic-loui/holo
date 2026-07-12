@@ -1061,7 +1061,8 @@ impl Neighbor {
             if let Some(adj_rib) = dest.adj_rib.remove(&self.index) {
                 // Update nexthop tracking.
                 if let Some((route, _)) = adj_rib.in_post() {
-                    rib::nexthop_untrack(nht, &prefix, route, ibus_tx);
+                    let nexthop = route.nexthop::<A>();
+                    rib::nexthop_untrack(nht, &prefix, nexthop, ibus_tx);
                 }
 
                 // Enqueue prefix for the BGP Decision Process.

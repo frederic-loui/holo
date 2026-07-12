@@ -411,6 +411,13 @@ impl Route {
             last_modified,
         }
     }
+
+    pub(crate) fn nexthop<A>(&self) -> IpAddr
+    where
+        A: AddressFamily,
+    {
+        A::nexthop_rx_extract(&self.attrs.base.value)
+    }
 }
 
 // ===== impl SelectionState =====
@@ -846,7 +853,7 @@ where
             (selection.is_eligible()
                 && route_ref.compare(&best_ref, selection_cfg, Some(mpath_cfg))
                     == RouteCompare::MultipathEqual)
-                .then(|| A::nexthop_rx_extract(&route.attrs.base.value))
+                .then(|| route.nexthop::<A>())
         })
         .collect::<Vec<_>>();
     nexthops.sort_unstable();
@@ -1078,15 +1085,24 @@ pub(crate) fn attrs_tx_update(
     }
 }
 
-pub(crate) fn nexthop_track<A>(
+// Updates the tracked nexthop of a route. Does nothing when the nexthop is
+// unchanged.
+pub(crate) fn nexthop_retrack<A>(
     nht: &mut HashMap<IpAddr, NhtEntry<A>>,
     prefix: A::IpNetwork,
-    route: &Route,
+    old_addr: Option<IpAddr>,
+    addr: IpAddr,
     ibus_tx: &IbusChannelsTx,
 ) where
     A: AddressFamily,
 {
-    let addr = A::nexthop_rx_extract(&route.attrs.base.value);
+    if old_addr == Some(addr) {
+        return;
+    }
+
+    if let Some(old_addr) = old_addr {
+        nexthop_untrack(nht, &prefix, old_addr, ibus_tx);
+    }
     let nht = nht.entry(addr).or_insert_with(|| {
         ibus::tx::nexthop_track(ibus_tx, addr);
         Default::default()
@@ -1094,15 +1110,15 @@ pub(crate) fn nexthop_track<A>(
     *nht.prefixes.entry(prefix).or_default() += 1;
 }
 
+// Stops tracking the nexthop of a route.
 pub(crate) fn nexthop_untrack<A>(
     nht: &mut HashMap<IpAddr, NhtEntry<A>>,
     prefix: &A::IpNetwork,
-    route: &Route,
+    addr: IpAddr,
     ibus_tx: &IbusChannelsTx,
 ) where
     A: AddressFamily,
 {
-    let addr = A::nexthop_rx_extract(&route.attrs.base.value);
     let hash_map::Entry::Occupied(mut nht_e) = nht.entry(addr) else {
         return;
     };

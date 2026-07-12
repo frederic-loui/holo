@@ -369,7 +369,8 @@ fn process_nbr_unreach_prefixes<A>(
             continue;
         };
         if let Some(route) = adj_rib.remove_in(counters) {
-            rib::nexthop_untrack(&mut table.nht, &prefix, &route, ibus_tx);
+            let nexthop = route.nexthop::<A>();
+            rib::nexthop_untrack(&mut table.nht, &prefix, nexthop, ibus_tx);
         }
 
         // Enqueue prefix for the BGP Decision Process.
@@ -493,17 +494,25 @@ where
                 // The route was accepted by the import policies.
                 Some(route_attrs) => {
                     let route = Route::new(route_attrs.clone(), now);
-                    if let Some((old_route, _)) = adj_rib.in_post() {
-                        rib::nexthop_untrack(nht, &prefix, old_route, ibus_tx);
-                    }
-                    if let Some(route) = adj_rib.update_in_post(route) {
-                        rib::nexthop_track(nht, prefix, route, ibus_tx);
+                    let old_nexthop = adj_rib
+                        .in_post()
+                        .map(|(route, _)| route.nexthop::<A>());
+                    let nexthop = route.nexthop::<A>();
+                    if adj_rib.update_in_post(route).is_some() {
+                        rib::nexthop_retrack(
+                            nht,
+                            prefix,
+                            old_nexthop,
+                            nexthop,
+                            ibus_tx,
+                        );
                     }
                 }
                 // The route was rejected by the import policies.
                 None => {
                     if let Some(route) = adj_rib.remove_in_post() {
-                        rib::nexthop_untrack(nht, &prefix, &route, ibus_tx);
+                        let nexthop = route.nexthop::<A>();
+                        rib::nexthop_untrack(nht, &prefix, nexthop, ibus_tx);
                     }
                 }
             }
