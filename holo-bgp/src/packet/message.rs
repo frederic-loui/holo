@@ -392,9 +392,10 @@ impl Message {
         }
 
         // Ensure the buffer is big enough to hold the entire message.
-        let mut buf = Bytes::copy_from_slice(&data[0..Self::MIN_LEN as usize]);
-        let _marker = buf.get_u128();
-        let msg_len = buf.get_u16();
+        let msg_len = u16::from_be_bytes([
+            data[Self::MSG_LEN_POS.start],
+            data[Self::MSG_LEN_POS.end - 1],
+        ]);
         if msg_len < Self::MIN_LEN || msg_len as usize > buf_size {
             return None;
         }
