@@ -7,7 +7,6 @@
 // See: https://nlnet.nl/NGI0
 //
 
-use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use holo_utils::ibus::IbusChannelsTx;
@@ -56,7 +55,7 @@ pub(crate) fn route_install(
                     .unwrap_or_default(),
             }
         })
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
 
     // Install route.
     let msg = RouteMsg {
@@ -84,7 +83,7 @@ pub(crate) fn route_install(
         let msg = LabelUninstallMsg {
             protocol: Protocol::ISIS,
             label: old_sr_label,
-            nexthops: BTreeSet::new(),
+            nexthops: Vec::new(),
             route: None,
         };
         ibus_tx.route_mpls_del(msg);
@@ -120,7 +119,7 @@ pub(crate) fn route_uninstall(
         let msg = LabelUninstallMsg {
             protocol: Protocol::ISIS,
             label: sr_label,
-            nexthops: BTreeSet::new(),
+            nexthops: Vec::new(),
             route: None,
         };
         ibus_tx.route_mpls_del(msg);

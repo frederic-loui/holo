@@ -433,7 +433,7 @@ impl Rib {
     // Note that only one level of recursion is resolved. If the resolved
     // next-hops contain recursive next-hops themselves, those will not be
     // resolved further.
-    fn resolve_nexthops(&self, nexthops: BTreeSet<Nexthop>) -> Box<[Nexthop]> {
+    fn resolve_nexthops(&self, nexthops: Vec<Nexthop>) -> Box<[Nexthop]> {
         nexthops
             .into_iter()
             .map(|mut nexthop| {

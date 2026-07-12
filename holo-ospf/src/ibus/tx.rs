@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use holo_utils::ibus::IbusChannelsTx;
@@ -62,7 +61,7 @@ pub(crate) fn route_install<V>(
                 }
             }
         })
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
 
     // Install route.
     let msg = RouteMsg {
@@ -86,7 +85,7 @@ pub(crate) fn route_install<V>(
         let msg = LabelUninstallMsg {
             protocol: V::PROTOCOL,
             label: old_sr_label,
-            nexthops: BTreeSet::new(),
+            nexthops: Vec::new(),
             route: None,
         };
         ibus_tx.route_mpls_del(msg);
@@ -134,7 +133,7 @@ pub(crate) fn route_uninstall<V>(
         let msg = LabelUninstallMsg {
             protocol: V::PROTOCOL,
             label: *sr_label,
-            nexthops: BTreeSet::new(),
+            nexthops: Vec::new(),
             route: None,
         };
         ibus_tx.route_mpls_del(msg);
@@ -183,7 +182,7 @@ where
     let msg = LabelUninstallMsg {
         protocol: V::PROTOCOL,
         label,
-        nexthops: BTreeSet::new(),
+        nexthops: Vec::new(),
         route: None,
     };
     ibus_tx.route_mpls_del(msg);

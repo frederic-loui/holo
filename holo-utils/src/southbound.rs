@@ -5,7 +5,7 @@
 //
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use bitflags::bitflags;
@@ -140,7 +140,7 @@ pub struct RouteMsg {
     pub tag: Option<u32>,
     #[serde(skip)]
     pub opaque_attrs: RouteOpaqueAttrs,
-    pub nexthops: BTreeSet<Nexthop>,
+    pub nexthops: Vec<Nexthop>,
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +154,7 @@ pub struct RouteKeyMsg {
 #[derive(Deserialize, Serialize)]
 pub struct BierNbrInstallMsg {
     pub bier_info: BierInfo,
-    pub nexthops: BTreeSet<Nexthop>,
+    pub nexthops: Vec<Nexthop>,
     pub prefix: IpNetwork,
 }
 
@@ -171,7 +171,7 @@ pub struct BierNbrUninstallMsg {
 pub struct LabelInstallMsg {
     pub protocol: Protocol,
     pub label: Label,
-    pub nexthops: BTreeSet<Nexthop>,
+    pub nexthops: Vec<Nexthop>,
     pub route: Option<(Protocol, IpNetwork)>,
     pub replace: bool,
 }
@@ -181,7 +181,7 @@ pub struct LabelInstallMsg {
 pub struct LabelUninstallMsg {
     pub protocol: Protocol,
     pub label: Label,
-    pub nexthops: BTreeSet<Nexthop>,
+    pub nexthops: Vec<Nexthop>,
     pub route: Option<(Protocol, IpNetwork)>,
 }
 

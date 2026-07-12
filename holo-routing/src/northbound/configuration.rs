@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock as Lazy};
 
@@ -1135,9 +1135,9 @@ impl Provider for Master {
 
                 // Get nexthops.
                 let mut kind = RouteKind::Unicast;
-                let mut nexthops = BTreeSet::default();
+                let mut nexthops = Vec::new();
                 if let Some(nexthop) = static_nexthop_get(&self.interfaces, &route.nexthop_single) {
-                    nexthops.insert(nexthop);
+                    nexthops.push(nexthop);
                 }
                 if let Some(special) = &route.nexthop_special {
                     kind = match special {
@@ -1147,7 +1147,7 @@ impl Provider for Master {
                     };
                 }
                 for nexthop in route.nexthop_list.values().filter_map(|nexthop| static_nexthop_get(&self.interfaces, nexthop)) {
-                    nexthops.insert(nexthop);
+                    nexthops.push(nexthop);
                 }
 
                 // Prepare message.

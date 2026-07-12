@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use holo_utils::ibus::IbusChannelsTx;
@@ -38,7 +37,7 @@ pub(crate) fn route_install(
             labels: Default::default(),
             resolved: Default::default(),
         })
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
 
     // Install route.
     let msg = RouteMsg {
@@ -49,7 +48,7 @@ pub(crate) fn route_install(
         metric: route.attrs.base.value.med.unwrap_or(0),
         tag: None,
         opaque_attrs: RouteOpaqueAttrs::None,
-        nexthops: nexthops.clone(),
+        nexthops,
     };
     ibus_tx.route_ip_add(msg);
 }
