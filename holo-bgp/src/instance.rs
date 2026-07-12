@@ -132,8 +132,6 @@ pub struct InstanceUpView<'a> {
 impl Instance {
     // Checks if the instance needs to be started or stopped in response to a
     // northbound or southbound event.
-    //
-    // Note: Router ID updates are ignored if the instance is already active.
     pub(crate) fn update(&mut self) {
         let router_id = self.get_router_id();
 
@@ -141,10 +139,28 @@ impl Instance {
             Ok(()) if !self.is_active() => {
                 self.start(router_id.unwrap());
             }
+            Ok(()) if self.state.as_ref().map(|s| s.router_id) != router_id => {
+                self.router_id_update(router_id.unwrap());
+            }
             Err(reason) if self.is_active() => {
                 self.stop(reason);
             }
             _ => (),
+        }
+    }
+
+    fn router_id_update(&mut self, router_id: Ipv4Addr) {
+        let Some((mut instance, neighbors)) = self.as_up() else {
+            return;
+        };
+
+        instance.state.router_id = router_id;
+
+        let error_code = ErrorCode::Cease;
+        let error_subcode = CeaseSubcode::OtherConfigurationChange;
+        for nbr in neighbors.values_mut() {
+            let msg = NotificationMsg::new(error_code, error_subcode);
+            nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
         }
     }
 
