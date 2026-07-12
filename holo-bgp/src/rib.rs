@@ -928,6 +928,8 @@ where
     })
 }
 
+// Updates the Loc-RIB entry of the given destination, returning whether the
+// entry has changed.
 pub(crate) fn loc_rib_update<A>(
     prefix: A::IpNetwork,
     dest: &mut Destination,
@@ -937,7 +939,8 @@ pub(crate) fn loc_rib_update<A>(
     distance_cfg: &DistanceCfg,
     trace_opts: &InstanceTraceOptions,
     ibus_tx: &IbusChannelsTx,
-) where
+) -> bool
+where
     A: AddressFamily,
 {
     if let Some(best_route) = best_route {
@@ -956,7 +959,7 @@ pub(crate) fn loc_rib_update<A>(
             && local_route.route_type == best_route.route_type
             && local_route.nexthops == nexthops
         {
-            return;
+            return false;
         }
 
         // Create new local route.
@@ -988,14 +991,19 @@ pub(crate) fn loc_rib_update<A>(
             Debug::BestPathNotFound(prefix.into()).log();
         }
 
-        // Remove route from the Loc-RIB.
-        if let Some(local_route) = dest.local.take() {
-            // Uninstall route from the global RIB.
-            if !local_route.origin.is_local() {
-                ibus::tx::route_uninstall(ibus_tx, prefix);
-            }
+        // Remove route from the Loc-RIB, returning early if there's nothing
+        // to remove.
+        let Some(local_route) = dest.local.take() else {
+            return false;
+        };
+
+        // Uninstall route from the global RIB.
+        if !local_route.origin.is_local() {
+            ibus::tx::route_uninstall(ibus_tx, prefix);
         }
     }
+
+    true
 }
 
 // Updates route attributes before they are added to the neighbor's pre-policy

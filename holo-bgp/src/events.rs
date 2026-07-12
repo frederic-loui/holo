@@ -683,7 +683,7 @@ where
         );
 
         // Update the Loc-RIB with the best path.
-        rib::loc_rib_update::<A>(
+        let changed = rib::loc_rib_update::<A>(
             prefix,
             dest,
             best_route.clone(),
@@ -693,6 +693,11 @@ where
             &instance.config.trace_opts,
             &instance.tx.ibus,
         );
+
+        // Skip route dissemination if the Loc-RIB entry hasn't changed.
+        if !changed {
+            continue;
+        }
 
         // Group best routes and unfeasible routes separately.
         match best_route {
