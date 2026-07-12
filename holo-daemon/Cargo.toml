@@ -8,6 +8,7 @@ edition.workspace = true
 [dependencies]
 console-subscriber = { version = "0.5", optional = true }
 prost-types = "0.14"
+tikv-jemallocator = { version = "0.6", optional = true }
 toml = "0.9"
 tokio-uring = { version = "0.5", optional = true }
 tokio-stream = "0.1"
@@ -103,6 +104,7 @@ vrrp = ["dep:holo-vrrp", "holo-interface/vrrp"]
 
 # Other features
 io_uring = ["dep:tokio-uring"]
+jemalloc = ["dep:tikv-jemallocator"]
 tokio_console = ["dep:console-subscriber"]
 yang5_bundled = ["yang5/bundled"]
 fastclick = ["holo-utils/fastclick"]

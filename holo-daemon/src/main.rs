@@ -24,6 +24,12 @@ use tracing_appender::rolling;
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::*;
 
+// jemalloc tends to fragment less than glibc malloc for routing workloads,
+// returning freed memory to the OS more aggressively.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 // Path for the exclusive flock(2) used to prevent concurrent instances.
 const INSTANCE_LOCK_PATH: &str = "/var/opt/holo/holod.lock";
 
