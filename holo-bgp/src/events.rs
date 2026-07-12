@@ -310,10 +310,11 @@ fn process_nbr_reach_prefixes<A>(
     let table = A::table(&mut rib.tables);
     let route_attrs = rib.attr_sets.get_route_attr_sets(&attrs);
     let counters = table.prefix_counters.entry(nbr.index).or_default();
+    let now = Instant::now();
     for prefix in &nlri_prefixes {
         let dest = table.prefixes.entry(*prefix).or_default();
         let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
-        let route = Route::new(route_attrs.clone());
+        let route = Route::new(route_attrs.clone(), now);
         adj_rib.update_in_pre(origin, route_type, route, counters);
     }
 
@@ -463,6 +464,7 @@ where
     let rib = &mut instance.state.rib;
     let table = A::table(&mut rib.tables);
     let ibus_tx = &instance.tx.ibus;
+    let now = Instant::now();
     for (result, prefixes) in routes {
         // Intern the attribute sets once for all prefixes sharing the same
         // policy result.
@@ -490,7 +492,7 @@ where
             match &route_attrs {
                 // The route was accepted by the import policies.
                 Some(route_attrs) => {
-                    let route = Route::new(route_attrs.clone());
+                    let route = Route::new(route_attrs.clone(), now);
                     if let Some((old_route, _)) = adj_rib.in_post() {
                         rib::nexthop_untrack(nht, &prefix, old_route, ibus_tx);
                     }
@@ -539,6 +541,7 @@ where
     let rib = &mut instance.state.rib;
     let table = A::table(&mut rib.tables);
     let counters = table.prefix_counters.entry(nbr.index).or_default();
+    let now = Instant::now();
     for (result, prefixes) in routes {
         match result {
             PolicyResult::Accept(rpinfo) => {
@@ -565,7 +568,7 @@ where
                     };
 
                     // Check if the Adj-RIB-Out was updated.
-                    let route = Route::new(route_attrs.clone());
+                    let route = Route::new(route_attrs.clone(), now);
                     let update = adj_rib
                         .out_post()
                         .is_none_or(|old_route| old_route.attrs != route.attrs);

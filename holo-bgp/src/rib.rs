@@ -405,10 +405,10 @@ impl AdjRib {
 // ===== impl Route =====
 
 impl Route {
-    pub(crate) fn new(attrs: Arc<RouteAttrs>) -> Route {
+    pub(crate) fn new(attrs: Arc<RouteAttrs>, last_modified: Instant) -> Route {
         Route {
             attrs,
-            last_modified: Instant::now(),
+            last_modified,
         }
     }
 }
