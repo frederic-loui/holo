@@ -22,7 +22,7 @@ use holo_yang::TryFromYang;
 
 use crate::af::{Ipv4Unicast, Ipv6Unicast};
 use crate::instance::{Instance, InstanceUpView};
-use crate::neighbor::{Neighbor, PeerType, fsm};
+use crate::neighbor::{PeerType, fsm};
 use crate::network;
 use crate::northbound::yang_gen::bgp;
 use crate::packet::iana::{CeaseSubcode, ErrorCode};
@@ -785,8 +785,7 @@ fn load_callbacks() -> Callbacks<Instance> {
             let peer_as = args.dnode.get_u32_relative("./peer-as").unwrap();
 
             let peer_type = if instance.config.asn == peer_as { PeerType::Internal } else { PeerType::External };
-            let nbr = Neighbor::new(nbr_addr, peer_type);
-            instance.neighbors.insert(nbr_addr, nbr);
+            instance.neighbors.insert(nbr_addr, peer_type);
 
             let event_queue = args.event_queue;
             event_queue.insert(Event::NeighborUpdate(nbr_addr));

@@ -49,6 +49,7 @@ const LARGE_HOLDTIME: u16 = 240;
 // BGP neighbor.
 #[derive(Debug)]
 pub struct Neighbor {
+    pub index: PeerIndex,
     pub remote_addr: IpAddr,
     pub config: NeighborCfg,
     pub state: fsm::State,
@@ -122,8 +123,63 @@ pub struct NeighborUpdateQueue<A: AddressFamily> {
     pub unreach: BTreeSet<A::IpNetwork>,
 }
 
-// Type aliases.
-pub type Neighbors = BTreeMap<IpAddr, Neighbor>;
+// Collection of BGP neighbors.
+#[derive(Debug, Default)]
+pub struct Neighbors {
+    // Neighbor binary tree keyed by remote address (1:1).
+    addr_tree: BTreeMap<IpAddr, Neighbor>,
+    // Next available peer index.
+    next_index: u32,
+}
+
+// Identifier assigned to a neighbor, used to key the Adj-RIB tables.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub struct PeerIndex(u32);
+
+// ===== impl Neighbors =====
+
+impl Neighbors {
+    // Creates and inserts a neighbor, assigning it a fresh peer index.
+    pub(crate) fn insert(&mut self, addr: IpAddr, peer_type: PeerType) {
+        let index = self.next_index();
+        let nbr = Neighbor::new(index, addr, peer_type);
+        self.addr_tree.insert(addr, nbr);
+    }
+
+    // Removes the neighbor corresponding to the given remote address.
+    pub(crate) fn remove(&mut self, addr: &IpAddr) -> Option<Neighbor> {
+        self.addr_tree.remove(addr)
+    }
+
+    // Returns a mutable reference to the neighbor corresponding to the given
+    // remote address.
+    pub(crate) fn get_mut(&mut self, addr: &IpAddr) -> Option<&mut Neighbor> {
+        self.addr_tree.get_mut(addr)
+    }
+
+    // Returns an iterator visiting all neighbors.
+    //
+    // Neighbors are ordered by their remote addresses.
+    pub(crate) fn values(&self) -> impl Iterator<Item = &'_ Neighbor> + '_ {
+        self.addr_tree.values()
+    }
+
+    // Returns an iterator visiting all neighbors with mutable references.
+    //
+    // Neighbors are ordered by their remote addresses.
+    pub(crate) fn values_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &'_ mut Neighbor> + '_ {
+        self.addr_tree.values_mut()
+    }
+
+    // Get next peer index.
+    fn next_index(&mut self) -> PeerIndex {
+        let index = PeerIndex(self.next_index);
+        self.next_index = self.next_index.wrapping_add(1);
+        index
+    }
+}
 
 // Finite State Machine.
 pub mod fsm {
@@ -194,8 +250,13 @@ pub mod fsm {
 
 impl Neighbor {
     // Creates a new neighbor in the Idle state with default configuration.
-    pub(crate) fn new(remote_addr: IpAddr, peer_type: PeerType) -> Neighbor {
+    fn new(
+        index: PeerIndex,
+        remote_addr: IpAddr,
+        peer_type: PeerType,
+    ) -> Neighbor {
         Neighbor {
+            index,
             remote_addr,
             config: Default::default(),
             state: fsm::State::Idle,
@@ -948,7 +1009,7 @@ impl Neighbor {
     {
         let table = A::table(&mut instance.state.rib.tables);
         for (prefix, dest) in &table.prefixes {
-            let Some(adj_rib) = dest.adj_rib.get(&self.remote_addr) else {
+            let Some(adj_rib) = dest.adj_rib.get(&self.index) else {
                 continue;
             };
             let Some(route) = adj_rib.out_post() else {
@@ -978,7 +1039,7 @@ impl Neighbor {
         let table = A::table(&mut rib.tables);
         for (prefix, dest) in table.prefixes.iter_mut() {
             // Clear the Adj-RIB-In and Adj-RIB-Out.
-            if let Some(mut adj_rib) = dest.adj_rib.remove(&self.remote_addr) {
+            if let Some(mut adj_rib) = dest.adj_rib.remove(&self.index) {
                 // Update nexthop tracking.
                 if let Some(adj_in_route) = adj_rib.in_post() {
                     rib::nexthop_untrack(

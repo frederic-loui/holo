@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::net::IpAddr;
 use std::sync::{Arc, atomic};
 
 use holo_northbound::state::{ListIterator, Provider, YangContainer, YangList, YangOps};
@@ -17,7 +16,7 @@ use ipnetwork::{Ipv4Network, Ipv6Network};
 use prefix_trie::PrefixMap;
 
 use crate::instance::Instance;
-use crate::neighbor::{Neighbor, fsm};
+use crate::neighbor::{Neighbor, PeerIndex, fsm};
 use crate::northbound::yang_gen::{self, bgp};
 use crate::packet::attribute::{AsPathSegment, AttrFlags, BaseAttrs, Comms, ExtComms, Extv6Comms, LargeComms, UnknownAttr};
 use crate::packet::iana::{Afi, Safi};
@@ -160,18 +159,18 @@ impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::afi_safis::af
 
     fn new(instance: &'a Instance, (nbr, afi_safi): &Self::ParentListEntry) -> Option<Self> {
         let rib = &instance.state.as_ref()?.rib;
-        fn count_stats<K>(prefixes: &PrefixMap<K, Destination>, addr: &IpAddr) -> (u32, u32, u32)
+        fn count_stats<K>(prefixes: &PrefixMap<K, Destination>, index: PeerIndex) -> (u32, u32, u32)
         where
             K: prefix_trie::Prefix,
         {
             prefixes
                 .values()
-                .filter_map(|dest| dest.adj_rib.get(addr))
+                .filter_map(|dest| dest.adj_rib.get(&index))
                 .fold((0, 0, 0), |(r, s, i), adj| (r + adj.in_pre().is_some() as u32, s + adj.out_post().is_some() as u32, i + adj.in_post().is_some() as u32))
         }
         let (r, s, i) = match afi_safi {
-            AfiSafi::Ipv4Unicast => count_stats(&rib.tables.ipv4_unicast.prefixes, &nbr.remote_addr),
-            AfiSafi::Ipv6Unicast => count_stats(&rib.tables.ipv6_unicast.prefixes, &nbr.remote_addr),
+            AfiSafi::Ipv4Unicast => count_stats(&rib.tables.ipv4_unicast.prefixes, nbr.index),
+            AfiSafi::Ipv6Unicast => count_stats(&rib.tables.ipv6_unicast.prefixes, nbr.index),
         };
         Some(Self {
             received: Some(r),
@@ -644,7 +643,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv4_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.remote_addr).and_then(|adj_rib| adj_rib.in_pre()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.in_pre()).map(|route| (prefix, route)));
         Some(iter)
     }
 
@@ -694,7 +693,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv4_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.remote_addr).and_then(|adj_rib| adj_rib.in_post()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.in_post()).map(|route| (prefix, route)));
         Some(iter)
     }
 
@@ -745,7 +744,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv4_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.remote_addr).and_then(|adj_rib| adj_rib.out_pre()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.out_pre()).map(|route| (prefix, route)));
         Some(iter)
     }
 
@@ -795,7 +794,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv4_unicast:
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv4_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.remote_addr).and_then(|adj_rib| adj_rib.out_post()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.out_post()).map(|route| (prefix, route)));
         Some(iter)
     }
 
@@ -918,7 +917,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv6_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.remote_addr).and_then(|adj_rib| adj_rib.in_pre()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.in_pre()).map(|route| (prefix, route)));
         Some(iter)
     }
 
@@ -968,7 +967,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv6_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.remote_addr).and_then(|adj_rib| adj_rib.in_post()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.in_post()).map(|route| (prefix, route)));
         Some(iter)
     }
 
@@ -1019,7 +1018,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv6_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.remote_addr).and_then(|adj_rib| adj_rib.out_pre()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.out_pre()).map(|route| (prefix, route)));
         Some(iter)
     }
 
@@ -1069,7 +1068,7 @@ impl<'a> YangList<'a, Instance> for bgp::rib::afi_safis::afi_safi::ipv6_unicast:
     fn iter(instance: &'a Instance, &nbr: &Self::ParentListEntry) -> Option<impl ListIterator<'a, Self::ListEntry>> {
         let rib = &instance.state.as_ref()?.rib;
         let iter = rib.tables.ipv6_unicast.prefixes.iter();
-        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.remote_addr).and_then(|adj_rib| adj_rib.out_post()).map(|route| (prefix, route)));
+        let iter = iter.filter_map(move |(prefix, dest)| dest.adj_rib.get(&nbr.index).and_then(|adj_rib| adj_rib.out_post()).map(|route| (prefix, route)));
         Some(iter)
     }
 

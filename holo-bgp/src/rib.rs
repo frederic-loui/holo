@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::af::{AddressFamily, Ipv4Unicast, Ipv6Unicast};
 use crate::debug::Debug;
 use crate::ibus;
-use crate::neighbor::{Neighbor, PeerType};
+use crate::neighbor::{Neighbor, PeerIndex, PeerType};
 use crate::northbound::configuration::{
     DistanceCfg, InstanceTraceOptions, MultipathCfg, RouteSelectionCfg,
 };
@@ -56,7 +56,7 @@ pub struct RoutingTable<A: AddressFamily> {
 #[derive(Debug, Default)]
 pub struct Destination {
     pub local: Option<Box<LocalRoute>>,
-    pub adj_rib: BTreeMap<IpAddr, AdjRib>,
+    pub adj_rib: BTreeMap<PeerIndex, AdjRib>,
     pub redistribute: Option<Box<Route>>,
 }
 

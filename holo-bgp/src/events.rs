@@ -306,7 +306,7 @@ fn process_nbr_reach_prefixes<A>(
     let route_attrs = rib.attr_sets.get_route_attr_sets(&attrs);
     for prefix in &nlri_prefixes {
         let dest = table.prefixes.entry(*prefix).or_default();
-        let adj_rib = dest.adj_rib.entry(nbr.remote_addr).or_default();
+        let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
         let route = Route::new(origin, route_attrs.clone(), route_type);
         adj_rib.update_in_pre(Box::new(route), &mut rib.attr_sets);
     }
@@ -359,7 +359,7 @@ fn process_nbr_unreach_prefixes<A>(
         let Some(dest) = table.prefixes.get_mut(&prefix) else {
             continue;
         };
-        let Some(adj_rib) = dest.adj_rib.get_mut(&nbr.remote_addr) else {
+        let Some(adj_rib) = dest.adj_rib.get_mut(&nbr.index) else {
             continue;
         };
 
@@ -463,7 +463,7 @@ where
         // Get RIB destination.
         let prefix = A::IpNetwork::get(prefix).unwrap();
         let dest = table.prefixes.entry(prefix).or_default();
-        let adj_rib = dest.adj_rib.entry(nbr.remote_addr).or_default();
+        let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
 
         // Update post-policy Adj-RIB-In routes.
         match result {
@@ -540,7 +540,7 @@ where
         // Get RIB destination.
         let prefix = A::IpNetwork::get(prefix).unwrap();
         let dest = table.prefixes.entry(prefix).or_default();
-        let adj_rib = dest.adj_rib.entry(nbr.remote_addr).or_default();
+        let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
 
         // Update post-policy Adj-RIB-Out routes.
         match result {
@@ -781,7 +781,7 @@ fn withdraw_routes<A>(
     // Update Adj-RIB-Out.
     for prefix in routes {
         let dest = table.prefixes.get_mut(prefix).unwrap();
-        let Some(adj_rib) = dest.adj_rib.get_mut(&nbr.remote_addr) else {
+        let Some(adj_rib) = dest.adj_rib.get_mut(&nbr.index) else {
             continue;
         };
 
@@ -812,7 +812,7 @@ pub(crate) fn advertise_routes<A>(
     // Update pre-policy Adj-RIB-Out routes.
     for (prefix, route) in &routes {
         let dest = table.prefixes.get_mut(prefix).unwrap();
-        let adj_rib = dest.adj_rib.entry(nbr.remote_addr).or_default();
+        let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
         adj_rib.update_out_pre(route.clone(), attr_sets);
     }
 
