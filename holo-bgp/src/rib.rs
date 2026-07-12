@@ -52,6 +52,17 @@ pub struct RoutingTable<A: AddressFamily> {
     pub prefixes: PrefixMap<A::IpNetwork, Destination>,
     pub queued_prefixes: BTreeSet<A::IpNetwork>,
     pub nht: HashMap<IpAddr, NhtEntry<A>>,
+    pub prefix_counters: HashMap<PeerIndex, PrefixCounters>,
+}
+
+// Per-peer prefix counters, maintained incrementally: prefixes received from
+// the peer (Adj-RIB-In), installed in the Loc-RIB with the peer as origin,
+// and advertised to the peer (post-policy Adj-RIB-Out).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PrefixCounters {
+    pub received: u32,
+    pub installed: u32,
+    pub sent: u32,
 }
 
 #[derive(Debug, Default)]
@@ -254,6 +265,7 @@ where
             prefixes: Default::default(),
             queued_prefixes: Default::default(),
             nht: Default::default(),
+            prefix_counters: Default::default(),
         }
     }
 }
@@ -293,6 +305,7 @@ impl AdjRib {
         origin: RouteOrigin,
         route_type: RouteType,
         route: Route,
+        counters: &mut PrefixCounters,
     ) {
         match &mut self.adj_in {
             Some(adj_in) => adj_in.pre = route,
@@ -303,6 +316,7 @@ impl AdjRib {
                     pre: route,
                     post: None,
                 }));
+                counters.received = counters.received.saturating_add(1);
             }
         }
     }
@@ -326,8 +340,13 @@ impl AdjRib {
 
     // Removes the whole Adj-RIB-In entry, returning the post-policy route (for
     // nexthop untracking by the caller).
-    pub(crate) fn remove_in(&mut self) -> Option<Route> {
-        self.adj_in.take()?.post.map(|(route, _)| route)
+    pub(crate) fn remove_in(
+        &mut self,
+        counters: &mut PrefixCounters,
+    ) -> Option<Route> {
+        let adj_in = self.adj_in.take()?;
+        counters.received = counters.received.saturating_sub(1);
+        adj_in.post.map(|(route, _)| route)
     }
 
     // Sets or updates the pre-policy advertised route.
@@ -348,22 +367,39 @@ impl AdjRib {
     //
     // If the pre-policy route is gone, the route is dropped and None is
     // returned.
-    pub(crate) fn update_out_post(&mut self, route: Route) -> Option<&Route> {
+    pub(crate) fn update_out_post(
+        &mut self,
+        route: Route,
+        counters: &mut PrefixCounters,
+    ) -> Option<&Route> {
         let adj_out = self.adj_out.as_mut()?;
+        if adj_out.post.is_none() {
+            counters.sent = counters.sent.saturating_add(1);
+        }
         Some(adj_out.post.insert(route))
     }
 
     // Removes the post-policy advertised route, returning it.
-    pub(crate) fn remove_out_post(&mut self) -> Option<Route> {
-        self.adj_out.as_mut()?.post.take()
+    pub(crate) fn remove_out_post(
+        &mut self,
+        counters: &mut PrefixCounters,
+    ) -> Option<Route> {
+        let route = self.adj_out.as_mut()?.post.take()?;
+        counters.sent = counters.sent.saturating_sub(1);
+        Some(route)
     }
 
     // Removes the whole Adj-RIB-Out entry, returning whether it had a
     // post-policy route (i.e. whether the route was actually advertised).
-    pub(crate) fn remove_out(&mut self) -> bool {
-        self.adj_out
-            .take()
-            .is_some_and(|adj_out| adj_out.post.is_some())
+    pub(crate) fn remove_out(&mut self, counters: &mut PrefixCounters) -> bool {
+        let Some(adj_out) = self.adj_out.take() else {
+            return false;
+        };
+        if adj_out.post.is_none() {
+            return false;
+        }
+        counters.sent = counters.sent.saturating_sub(1);
+        true
     }
 }
 

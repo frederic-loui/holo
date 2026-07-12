@@ -151,6 +151,12 @@ impl Neighbors {
         self.addr_tree.remove(addr)
     }
 
+    // Returns a reference to the neighbor corresponding to the given remote
+    // address.
+    pub(crate) fn get(&self, addr: &IpAddr) -> Option<&Neighbor> {
+        self.addr_tree.get(addr)
+    }
+
     // Returns a mutable reference to the neighbor corresponding to the given
     // remote address.
     pub(crate) fn get_mut(&mut self, addr: &IpAddr) -> Option<&mut Neighbor> {
@@ -1044,6 +1050,9 @@ impl Neighbor {
                 table.queued_prefixes.insert(prefix);
             }
         }
+
+        // Drop the per-peer prefix counters.
+        table.prefix_counters.remove(&self.index);
     }
 
     // Clears the neighbor session.

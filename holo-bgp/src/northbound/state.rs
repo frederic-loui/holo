@@ -13,15 +13,14 @@ use holo_utils::protocol::Protocol;
 use holo_yang::ToYang;
 use holo_yang::types::{Base64Str, Timeticks};
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use prefix_trie::PrefixMap;
 
 use crate::instance::Instance;
-use crate::neighbor::{Neighbor, PeerIndex, fsm};
+use crate::neighbor::{Neighbor, fsm};
 use crate::northbound::yang_gen::{self, bgp};
 use crate::packet::attribute::{AsPathSegment, AttrFlags, BaseAttrs, Comms, ExtComms, Extv6Comms, LargeComms, UnknownAttr};
 use crate::packet::iana::{Afi, Safi};
 use crate::packet::message::{AddPathTuple, Capability};
-use crate::rib::{AttrSet, Destination, LocalRoute, Route, SelectionState};
+use crate::rib::{AttrSet, LocalRoute, Route, SelectionState};
 
 pub static AFI_SAFIS: [AfiSafi; 2] = [AfiSafi::Ipv4Unicast, AfiSafi::Ipv6Unicast];
 
@@ -159,23 +158,16 @@ impl<'a> YangContainer<'a, Instance> for bgp::neighbors::neighbor::afi_safis::af
 
     fn new(instance: &'a Instance, (nbr, afi_safi): &Self::ParentListEntry) -> Option<Self> {
         let rib = &instance.state.as_ref()?.rib;
-        fn count_stats<K>(prefixes: &PrefixMap<K, Destination>, index: PeerIndex) -> (u32, u32, u32)
-        where
-            K: prefix_trie::Prefix,
-        {
-            prefixes
-                .values()
-                .filter_map(|dest| dest.adj_rib.get(&index))
-                .fold((0, 0, 0), |(r, s, i), adj| (r + adj.in_pre().is_some() as u32, s + adj.out_post().is_some() as u32, i + adj.in_post().is_some() as u32))
+        let counters = match afi_safi {
+            AfiSafi::Ipv4Unicast => rib.tables.ipv4_unicast.prefix_counters.get(&nbr.index),
+            AfiSafi::Ipv6Unicast => rib.tables.ipv6_unicast.prefix_counters.get(&nbr.index),
         }
-        let (r, s, i) = match afi_safi {
-            AfiSafi::Ipv4Unicast => count_stats(&rib.tables.ipv4_unicast.prefixes, nbr.index),
-            AfiSafi::Ipv6Unicast => count_stats(&rib.tables.ipv6_unicast.prefixes, nbr.index),
-        };
+        .copied()
+        .unwrap_or_default();
         Some(Self {
-            received: Some(r),
-            sent: Some(s),
-            installed: Some(i),
+            received: Some(counters.received),
+            sent: Some(counters.sent),
+            installed: Some(counters.installed),
         })
     }
 }

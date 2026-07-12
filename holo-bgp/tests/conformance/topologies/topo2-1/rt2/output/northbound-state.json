@@ -38,7 +38,7 @@
                         "prefixes": {
                           "received": 4,
                           "sent": 3,
-                          "installed": 4
+                          "installed": 3
                         }
                       }
                     ]
@@ -125,7 +125,7 @@
                         "prefixes": {
                           "received": 4,
                           "sent": 4,
-                          "installed": 4
+                          "installed": 2
                         }
                       }
                     ]

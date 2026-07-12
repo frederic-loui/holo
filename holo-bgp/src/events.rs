@@ -309,11 +309,12 @@ fn process_nbr_reach_prefixes<A>(
     // Update pre-policy Adj-RIB-In routes.
     let table = A::table(&mut rib.tables);
     let route_attrs = rib.attr_sets.get_route_attr_sets(&attrs);
+    let counters = table.prefix_counters.entry(nbr.index).or_default();
     for prefix in &nlri_prefixes {
         let dest = table.prefixes.entry(*prefix).or_default();
         let adj_rib = dest.adj_rib.entry(nbr.index).or_default();
         let route = Route::new(route_attrs.clone());
-        adj_rib.update_in_pre(origin, route_type, route);
+        adj_rib.update_in_pre(origin, route_type, route, counters);
     }
 
     // Get policy configuration for the address family.
@@ -358,6 +359,7 @@ fn process_nbr_unreach_prefixes<A>(
 
     // Remove routes from Adj-RIB-In.
     let table = A::table(&mut rib.tables);
+    let counters = table.prefix_counters.entry(nbr.index).or_default();
     for prefix in nlri_prefixes {
         let Some(dest) = table.prefixes.get_mut(&prefix) else {
             continue;
@@ -365,7 +367,7 @@ fn process_nbr_unreach_prefixes<A>(
         let Some(adj_rib) = dest.adj_rib.get_mut(&nbr.index) else {
             continue;
         };
-        if let Some(route) = adj_rib.remove_in() {
+        if let Some(route) = adj_rib.remove_in(counters) {
             rib::nexthop_untrack(&mut table.nht, &prefix, &route, ibus_tx);
         }
 
@@ -536,6 +538,7 @@ where
 
     let rib = &mut instance.state.rib;
     let table = A::table(&mut rib.tables);
+    let counters = table.prefix_counters.entry(nbr.index).or_default();
     for (result, prefixes) in routes {
         match result {
             PolicyResult::Accept(rpinfo) => {
@@ -568,7 +571,9 @@ where
                         .is_none_or(|old_route| old_route.attrs != route.attrs);
 
                     // Update post-policy Adj-RIB-Out routes.
-                    if update && adj_rib.update_out_post(route).is_some() {
+                    if update
+                        && adj_rib.update_out_post(route, counters).is_some()
+                    {
                         advertise.push(prefix);
                     }
                 }
@@ -597,7 +602,7 @@ where
                     };
 
                     // Update post-policy Adj-RIB-Out routes.
-                    if adj_rib.remove_out_post().is_some() {
+                    if adj_rib.remove_out_post(counters).is_some() {
                         // Update neighbor's Tx queue.
                         let update_queue =
                             A::update_queue(&mut nbr.update_queues);
@@ -721,6 +726,7 @@ where
         );
 
         // Update the Loc-RIB with the best path.
+        let old_origin = dest.local.as_ref().map(|local| local.origin);
         let changed = rib::loc_rib_update::<A>(
             prefix,
             dest,
@@ -731,6 +737,26 @@ where
             &instance.config.trace_opts,
             &instance.tx.ibus,
         );
+
+        // Update the per-peer installed prefix counters if the origin of the
+        // Loc-RIB route has changed.
+        let new_origin = dest.local.as_ref().map(|local| local.origin);
+        if old_origin != new_origin {
+            if let Some(RouteOrigin::Neighbor { remote_addr, .. }) = old_origin
+                && let Some(nbr) = neighbors.get(&remote_addr)
+                && let Some(counters) =
+                    table.prefix_counters.get_mut(&nbr.index)
+            {
+                counters.installed = counters.installed.saturating_sub(1);
+            }
+            if let Some(RouteOrigin::Neighbor { remote_addr, .. }) = new_origin
+                && let Some(nbr) = neighbors.get(&remote_addr)
+            {
+                let counters =
+                    table.prefix_counters.entry(nbr.index).or_default();
+                counters.installed = counters.installed.saturating_add(1);
+            }
+        }
 
         // Skip route dissemination if the Loc-RIB entry hasn't changed.
         if !changed {
@@ -809,13 +835,14 @@ fn withdraw_routes<A>(
     A: AddressFamily,
 {
     // Update Adj-RIB-Out.
+    let counters = table.prefix_counters.entry(nbr.index).or_default();
     for prefix in routes {
         let dest = table.prefixes.get_mut(prefix).unwrap();
         let Some(adj_rib) = dest.adj_rib.get_mut(&nbr.index) else {
             continue;
         };
 
-        if adj_rib.remove_out() {
+        if adj_rib.remove_out(counters) {
             let update_queue = A::update_queue(&mut nbr.update_queues);
             update_queue.unreach.insert(*prefix);
         }
