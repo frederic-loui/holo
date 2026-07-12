@@ -1040,16 +1040,15 @@ pub fn decode_ipv4_prefix(
     buf.try_copy_to_slice(&mut prefix_bytes[..plen_wire])?;
     let prefix = Ipv4Addr::from(prefix_bytes);
     let prefix = Ipv4Network::new(prefix, plen)
-        .map(|prefix| prefix.apply_mask())
         .map_err(|_| UpdateMessageError::InvalidNetworkField)?;
+
+    // Normalize prefix.
+    let prefix = prefix.apply_mask();
 
     // Ignore semantically incorrect prefix.
     if !prefix.is_routable() {
         return Ok(None);
     }
-
-    // Normalize prefix.
-    let prefix = prefix.apply_mask();
 
     Ok(Some(prefix))
 }
@@ -1069,16 +1068,15 @@ pub fn decode_ipv6_prefix(
     buf.try_copy_to_slice(&mut prefix_bytes[..plen_wire])?;
     let prefix = Ipv6Addr::from(prefix_bytes);
     let prefix = Ipv6Network::new(prefix, plen)
-        .map(|prefix| prefix.apply_mask())
         .map_err(|_| UpdateMessageError::InvalidNetworkField)?;
+
+    // Normalize prefix.
+    let prefix = prefix.apply_mask();
 
     // Ignore semantically incorrect prefix.
     if !prefix.is_routable() {
         return Ok(None);
     }
-
-    // Normalize prefix.
-    let prefix = prefix.apply_mask();
 
     Ok(Some(prefix))
 }
