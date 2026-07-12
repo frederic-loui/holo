@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bitflags::bitflags;
@@ -73,6 +73,11 @@ bitflags! {
         const EXTENDED = 0x10;
     }
 }
+
+// Set of attribute types, implemented as a fixed-size bitset covering all
+// 256 possible type codes.
+#[derive(Debug, Default)]
+struct AttrTypeSet([u64; 4]);
 
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[derive(Deserialize, Serialize)]
@@ -311,7 +316,7 @@ impl Attrs {
             .contains(&NegotiatedCapability::FourOctetAsNumber);
 
         // List of parsed attributes.
-        let mut attr_list = HashSet::new();
+        let mut attr_list = AttrTypeSet::default();
 
         // Parse attributes.
         while buf.remaining() > 0 {
@@ -575,6 +580,23 @@ impl Attrs {
         }
 
         length
+    }
+}
+
+// ===== impl AttrTypeSet =====
+
+impl AttrTypeSet {
+    // Adds an attribute type to the set. Returns whether the type was not
+    // already present.
+    fn insert(&mut self, attr_type: u8) -> bool {
+        // Word index (type / 64) and bit position within it (type % 64).
+        let word = &mut self.0[usize::from(attr_type >> 6)];
+        let bit = 1u64 << (attr_type & 0x3f);
+        if *word & bit != 0 {
+            return false;
+        }
+        *word |= bit;
+        true
     }
 }
 
