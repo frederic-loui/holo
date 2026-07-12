@@ -116,7 +116,7 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::Route<'a> {
         let iter: Box<dyn Iterator<Item = Self::ListEntry> + 'a> = match af {
             RibAddressFamily::Ipv4 => {
                 let iter = master.rib.ip.ipv4().iter().flat_map(|(dest, routes)| {
-                    routes.values().filter(|route| !route.flags.contains(RouteFlags::REMOVED)).map(move |route| {
+                    routes.iter().filter(|route| !route.flags.contains(RouteFlags::REMOVED)).map(move |route| {
                         let dest = RouteDestination::new_ipv4(dest);
                         (dest, route)
                     })
@@ -125,7 +125,7 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::Route<'a> {
             }
             RibAddressFamily::Ipv6 => {
                 let iter = master.rib.ip.ipv6().iter().flat_map(|(dest, routes)| {
-                    routes.values().filter(|route| !route.flags.contains(RouteFlags::REMOVED)).map(move |route| {
+                    routes.iter().filter(|route| !route.flags.contains(RouteFlags::REMOVED)).map(move |route| {
                         let dest = RouteDestination::new_ipv6(dest);
                         (dest, route)
                     })

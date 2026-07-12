@@ -29,7 +29,7 @@ use crate::{ibus, netlink};
 
 #[derive(Debug)]
 pub struct Rib {
-    pub ip: JointPrefixMap<IpNetwork, BTreeMap<u32, Route>>,
+    pub ip: JointPrefixMap<IpNetwork, Vec<Route>>,
     pub mpls: BTreeMap<Label, Route>,
     pub nht: HashMap<IpAddr, NhtEntry>,
     pub ip_update_queue: BTreeSet<IpNetwork>,
@@ -96,26 +96,12 @@ impl Rib {
     ) {
         msg.nexthops = self.resolve_nexthops(msg.nexthops);
         let rib_prefix = self.prefix_entry(msg.prefix);
-        match rib_prefix.entry(msg.distance) {
-            btree_map::Entry::Vacant(v) => {
-                // If the IP route does not exist, create a new entry.
-                v.insert(Route::new(
-                    msg.protocol,
-                    owner,
-                    msg.kind,
-                    msg.distance,
-                    msg.metric,
-                    msg.tag,
-                    msg.opaque_attrs,
-                    msg.nexthops,
-                    Utc::now(),
-                    RouteFlags::empty(),
-                ));
-            }
-            btree_map::Entry::Occupied(o) => {
-                let route = o.into_mut();
-
+        match rib_prefix
+            .binary_search_by_key(&msg.distance, |route| route.distance)
+        {
+            Ok(idx) => {
                 // Update the existing IP route with the new information.
+                let route = &mut rib_prefix[idx];
                 route.owner = owner;
                 route.kind = msg.kind;
                 route.distance = msg.distance;
@@ -125,6 +111,25 @@ impl Rib {
                 route.nexthops = msg.nexthops;
                 route.last_updated = Utc::now();
                 route.flags.remove(RouteFlags::REMOVED);
+            }
+            Err(idx) => {
+                // If the IP route does not exist, create a new entry,
+                // keeping the list sorted by distance.
+                rib_prefix.insert(
+                    idx,
+                    Route::new(
+                        msg.protocol,
+                        owner,
+                        msg.kind,
+                        msg.distance,
+                        msg.metric,
+                        msg.tag,
+                        msg.opaque_attrs,
+                        msg.nexthops,
+                        Utc::now(),
+                        RouteFlags::empty(),
+                    ),
+                );
             }
         }
 
@@ -138,7 +143,7 @@ impl Rib {
 
         // Find IP route entry from the same advertising protocol.
         if let Some(route) = rib_prefix
-            .values_mut()
+            .iter_mut()
             .find(|route| route.protocol == msg.protocol)
         {
             // Mark IP route as removed.
@@ -195,7 +200,7 @@ impl Rib {
         if let Some((protocol, prefix)) = msg.route {
             let rib_prefix = self.prefix_entry(prefix);
             if let Some(route) = rib_prefix
-                .values_mut()
+                .iter_mut()
                 .find(|route| route.protocol == protocol)
             {
                 // Update route's nexthop labels.
@@ -234,7 +239,7 @@ impl Rib {
             if let Some((protocol, prefix)) = msg.route {
                 let rib_prefix = self.prefix_entry(prefix);
                 if let Some(route) = rib_prefix
-                    .values_mut()
+                    .iter_mut()
                     .find(|route| route.protocol == protocol)
                 {
                     // Remove route's nexthop labels.
@@ -262,7 +267,7 @@ impl Rib {
             if let Some((protocol, prefix)) = msg.route {
                 let rib_prefix = self.prefix_entry(prefix);
                 if let Some(route) = rib_prefix
-                    .values_mut()
+                    .iter_mut()
                     .find(|route| route.protocol == protocol)
                 {
                     // Remove nexthop labels from the IP route.
@@ -326,16 +331,16 @@ impl Rib {
 
             // Find the protocol of the old best route, if one exists.
             let old_best_protocol = rib_prefix
-                .values()
+                .iter()
                 .find(|route| route.flags.contains(RouteFlags::ACTIVE))
                 .map(|route| route.protocol);
 
             // Remove routes marked with the REMOVED flag.
             rib_prefix
-                .retain(|_, route| !route.flags.contains(RouteFlags::REMOVED));
+                .retain(|route| !route.flags.contains(RouteFlags::REMOVED));
 
             // Select and (re)install the best route for this prefix.
-            for (idx, route) in rib_prefix.values_mut().enumerate() {
+            for (idx, route) in rib_prefix.iter_mut().enumerate() {
                 if idx == 0 {
                     // Mark the route as the preferred one.
                     route.flags.insert(RouteFlags::ACTIVE);
@@ -419,15 +424,16 @@ impl Rib {
     }
 
     // Returns RIB entry associated to the given IP prefix.
-    fn prefix_entry(&mut self, prefix: IpNetwork) -> &mut BTreeMap<u32, Route> {
+    //
+    // The returned list of routes is sorted by administrative distance.
+    fn prefix_entry(&mut self, prefix: IpNetwork) -> &mut Vec<Route> {
         self.ip.entry(prefix).or_default()
     }
 
     // Returns the longest matching route for the given IP address.
     fn prefix_longest_match(&self, addr: &IpAddr) -> Option<&Route> {
         let (_, lpm) = self.ip.get_lpm(&addr.to_host_prefix())?;
-        lpm.values()
-            .next()
+        lpm.first()
             .filter(|route| route.flags.contains(RouteFlags::ACTIVE))
             .filter(|route| !route.flags.contains(RouteFlags::REMOVED))
     }
@@ -491,7 +497,7 @@ impl Rib {
     // Removes all IP and MPLS routes installed by the given client.
     pub(crate) fn route_remove_all_by_owner(&mut self, owner: IbusClientId) {
         for (prefix, rib_prefix) in self.ip.iter_mut() {
-            for route in rib_prefix.values_mut() {
+            for route in rib_prefix.iter_mut() {
                 if route.owner == owner {
                     route.flags.insert(RouteFlags::REMOVED);
                     self.ip_update_queue.insert(prefix);
@@ -514,7 +520,7 @@ impl Rib {
     ) {
         for (prefix, rib_prefix) in &self.ip {
             if let Some(route) = rib_prefix
-                .values()
+                .iter()
                 .find(|route| route.flags.contains(RouteFlags::ACTIVE))
             {
                 netlink::ip_route_uninstall(

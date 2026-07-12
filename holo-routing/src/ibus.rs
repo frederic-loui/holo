@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::collections::{BTreeMap, hash_map};
+use std::collections::hash_map;
 use std::net::IpAddr;
 
 use holo_utils::ibus::{
@@ -154,19 +154,18 @@ pub(crate) fn process_msg(
             }
 
             // Redistribute active routes of the requested protocol type.
-            let redistribute_prefix =
-                |prefix, routes: &BTreeMap<u32, Route>| {
-                    if let Some(best_route) = routes
-                        .values()
-                        .find(|route| route.protocol == protocol)
-                        .filter(|route| {
-                            route.flags.contains(RouteFlags::ACTIVE)
-                                && !route.flags.contains(RouteFlags::REMOVED)
-                        })
-                    {
-                        notify_redistribute_add(sub, prefix, best_route);
-                    }
-                };
+            let redistribute_prefix = |prefix, routes: &Vec<Route>| {
+                if let Some(best_route) = routes
+                    .iter()
+                    .find(|route| route.protocol == protocol)
+                    .filter(|route| {
+                        route.flags.contains(RouteFlags::ACTIVE)
+                            && !route.flags.contains(RouteFlags::REMOVED)
+                    })
+                {
+                    notify_redistribute_add(sub, prefix, best_route);
+                }
+            };
             if af.is_none() || af == Some(AddressFamily::Ipv4) {
                 for (prefix, routes) in master.rib.ip.ipv4().iter() {
                     redistribute_prefix(prefix.into(), routes);
