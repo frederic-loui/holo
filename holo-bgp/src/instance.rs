@@ -394,12 +394,16 @@ impl InstanceState {
         })
     }
 
-    // Schedules the BGP Decision Process to happen 100 milliseconds
-    // from now, renewing the timeout if called before expiry.
+    // Schedules the BGP Decision Process, coalescing triggering events
+    // that arrive within 100 milliseconds into a single run.
     pub(crate) fn schedule_decision_process(
         &mut self,
         instance_tx: &InstanceChannelsTx<Instance>,
     ) {
+        if self.decision_process_task.is_some() {
+            return;
+        }
+
         let task = tasks::schedule_decision_process(
             &instance_tx.protocol_input.decision_process,
         );
@@ -591,6 +595,7 @@ fn process_protocol_msg(
         },
         // Decision process.
         ProtocolInputMsg::TriggerDecisionProcess(_) => {
+            instance.state.decision_process_task = None;
             events::decision_process(instance, neighbors)?;
         }
     }
