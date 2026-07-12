@@ -14,7 +14,7 @@ use holo_utils::socket::{
     OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, TcpConnInfo,
     TcpListener, TcpSocket, TcpSocketExt, TcpStream, TcpStreamExt,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
@@ -203,10 +203,11 @@ pub(crate) async fn connect(
 
 #[cfg(not(feature = "testing"))]
 pub(crate) async fn nbr_write_loop(
-    mut stream: OwnedWriteHalf,
+    stream: OwnedWriteHalf,
     mut cxt: EncodeCxt,
     mut nbr_msg_txc: UnboundedReceiver<NbrTxMsg>,
 ) {
+    let mut stream = BufWriter::with_capacity(65536, stream);
     while let Some(msg) = nbr_msg_txc.recv().await {
         match msg {
             // Send message to the peer.
@@ -227,6 +228,11 @@ pub(crate) async fn nbr_write_loop(
             }
             // Update negotiated capabilities.
             NbrTxMsg::UpdateCapabilities(caps) => cxt.capabilities = caps,
+        }
+
+        // Send any data still sitting in the write buffer.
+        if let Err(error) = stream.flush().await {
+            IoError::TcpSendError(error).log();
         }
     }
 }
