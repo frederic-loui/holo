@@ -774,44 +774,47 @@ where
     }
 
     // Phase 3: Route Dissemination.
-    for nbr in neighbors
-        .values_mut()
-        .filter(|nbr| nbr.state == fsm::State::Established)
-    {
-        // Skip neighbors that haven't this address-family enabled.
-        if !nbr.is_af_enabled(A::AFI, A::SAFI) {
-            continue;
-        }
-
-        // Evaluate routes eligible for distribution to this neighbor.
-        //
-        // Any routes that fail to meet the distribution criteria are marked
-        // as unreachable to ensure previous advertisements are withdrawn.
-        let mut nbr_unreach = unreach.clone();
-        let mut nbr_reach = Vec::with_capacity(reach.len());
-        for (prefix, route) in &reach {
-            if nbr.distribute_filter(route) {
-                nbr_reach.push((*prefix, route.as_ref()));
-            } else {
-                nbr_unreach.push(*prefix);
+    if !reach.is_empty() || !unreach.is_empty() {
+        for nbr in neighbors
+            .values_mut()
+            .filter(|nbr| nbr.state == fsm::State::Established)
+        {
+            // Skip neighbors that haven't this address-family enabled.
+            if !nbr.is_af_enabled(A::AFI, A::SAFI) {
+                continue;
             }
-        }
 
-        // Withdraw unfeasible routes immediately.
-        if !nbr_unreach.is_empty() {
-            withdraw_routes::<A>(nbr, table, &nbr_unreach);
-        }
+            // Evaluate routes eligible for distribution to this neighbor.
+            //
+            // Any routes that fail to meet the distribution criteria are
+            // marked as unreachable to ensure previous advertisements are
+            // withdrawn.
+            let mut nbr_unreach = unreach.clone();
+            let mut nbr_reach = Vec::with_capacity(reach.len());
+            for (prefix, route) in &reach {
+                if nbr.distribute_filter(route) {
+                    nbr_reach.push((*prefix, route.as_ref()));
+                } else {
+                    nbr_unreach.push(*prefix);
+                }
+            }
 
-        // Advertise best routes.
-        if !nbr_reach.is_empty() {
-            advertise_routes::<A>(
-                nbr,
-                table,
-                nbr_reach,
-                &mut instance.state.rib.attr_sets,
-                instance.shared,
-                &instance.state.policy_apply_tasks,
-            );
+            // Withdraw unfeasible routes immediately.
+            if !nbr_unreach.is_empty() {
+                withdraw_routes::<A>(nbr, table, &nbr_unreach);
+            }
+
+            // Advertise best routes.
+            if !nbr_reach.is_empty() {
+                advertise_routes::<A>(
+                    nbr,
+                    table,
+                    nbr_reach,
+                    &mut instance.state.rib.attr_sets,
+                    instance.shared,
+                    &instance.state.policy_apply_tasks,
+                );
+            }
         }
     }
 
