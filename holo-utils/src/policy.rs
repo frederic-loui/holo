@@ -425,6 +425,19 @@ pub enum BgpSetCommMethod<T: Eq + Ord + PartialEq + PartialOrd> {
     Reference(String),
 }
 
+// ===== impl PolicyResult =====
+
+impl<T> PolicyResult<T> {
+    // Maps a `PolicyResult<T>` to a `PolicyResult<U>` by applying a function
+    // to the accepted value, leaving a rejection unchanged.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> PolicyResult<U> {
+        match self {
+            PolicyResult::Accept(value) => PolicyResult::Accept(f(value)),
+            PolicyResult::Reject => PolicyResult::Reject,
+        }
+    }
+}
+
 // ===== impl DefaultPolicyType =====
 
 impl TryFromYang for DefaultPolicyType {

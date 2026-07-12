@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -43,41 +44,74 @@ pub struct RoutePolicyInfo {
 
 // ===== global functions =====
 
-// Applies neighbor import or export routing policies to a provided list of
-// routes and sends the resulting policy decisions to the specified channel.
+// Applies neighbor import or export routing policies to a list of prefixes
+// sharing the same attributes and sends the resulting policy decisions to
+// the specified channel.
 pub(crate) fn neighbor_apply(
     policy_type: PolicyType,
     nbr_addr: IpAddr,
     afi_safi: AfiSafi,
-    routes: Vec<(IpNetwork, RoutePolicyInfo)>,
+    prefixes: Vec<IpNetwork>,
+    rpinfo: RoutePolicyInfo,
     policies: &[Arc<Policy>],
     match_sets: &MatchSets,
     default_policy: DefaultPolicyType,
     policy_resultp: &UnboundedSender<PolicyResultMsg>,
 ) {
-    // Process policies for each route and collect the results.
-    let routes = routes
-        .into_iter()
-        .map(|(prefix, rpinfo)| {
-            let result = process_policies(
-                afi_safi,
-                prefix,
-                rpinfo,
-                policies,
-                match_sets,
-                default_policy,
-            );
+    // Process policies for each prefix and collect the results, keeping
+    // prefixes with the same result grouped so their shared attribute set is
+    // carried only once.
+    let mut results = vec![];
+    let mut accepted = vec![];
+    let mut rejected = vec![];
+    let mut modified: BTreeMap<Attrs, Vec<IpNetwork>> = BTreeMap::new();
+    for prefix in prefixes {
+        match process_policies(
+            afi_safi,
+            prefix,
+            &rpinfo,
+            policies,
+            match_sets,
+            default_policy,
+        ) {
+            PolicyResult::Accept(Cow::Borrowed(_)) => {
+                accepted.push(prefix);
+            }
+            PolicyResult::Accept(Cow::Owned(rpinfo)) => {
+                modified.entry(rpinfo.attrs).or_default().push(prefix);
+            }
+            PolicyResult::Reject => rejected.push(prefix),
+        }
+    }
 
-            (prefix, result)
-        })
-        .collect();
+    // Routes accepted with modified attributes, one group per distinct set.
+    results.extend(modified.into_iter().map(|(attrs, prefixes)| {
+        let rpinfo = RoutePolicyInfo::new(
+            rpinfo.origin,
+            rpinfo.route_type,
+            rpinfo.tag,
+            rpinfo.opaque_attrs,
+            attrs,
+        );
+        (PolicyResult::Accept(rpinfo), prefixes)
+    }));
+
+    // Routes accepted with unmodified attributes.
+    if !accepted.is_empty() {
+        results.push((PolicyResult::Accept(rpinfo), accepted));
+    }
+
+    // Rejected routes.
+    if !rejected.is_empty() {
+        results.push((PolicyResult::Reject, rejected));
+    }
 
     // Send the resulting policy decisions to the specified channel.
     let _ = policy_resultp.send(PolicyResultMsg::Neighbor {
         policy_type,
         nbr_addr,
         afi_safi,
-        routes,
+        routes: results,
     });
 }
 
@@ -96,11 +130,12 @@ pub(crate) fn redistribute_apply(
     let result = process_policies(
         afi_safi,
         prefix,
-        rpinfo,
+        &rpinfo,
         policies,
         match_sets,
         default_policy,
-    );
+    )
+    .map(Cow::into_owned);
 
     // Send the resulting policy decision to the specified channel.
     let _ = policy_resultp.send(PolicyResultMsg::Redistribute {
@@ -114,15 +149,20 @@ pub(crate) fn redistribute_apply(
 
 // Processes routing policies for a specific route and returns the policy
 // result.
-fn process_policies(
+//
+// The route policy info is cloned only when a policy action modifies it; the
+// borrowed variant of the returned copy-on-write value means the route was
+// accepted unmodified.
+fn process_policies<'a>(
     afi_safi: AfiSafi,
     prefix: IpNetwork,
-    mut rpinfo: RoutePolicyInfo,
+    rpinfo: &'a RoutePolicyInfo,
     policies: &[Arc<Policy>],
     match_sets: &MatchSets,
     default_policy: DefaultPolicyType,
-) -> PolicyResult<RoutePolicyInfo> {
+) -> PolicyResult<Cow<'a, RoutePolicyInfo>> {
     let mut matches = false;
+    let mut rpinfo = Cow::Borrowed(rpinfo);
 
     for stmt in policies.iter().flat_map(|policy| policy.stmts.values()) {
         // Check if all conditions in the policy statement are satisfied.
@@ -138,9 +178,16 @@ fn process_policies(
 
         // Process actions defined in the policy statement.
         for action in stmt.actions.values() {
-            if !process_stmt_action(&mut rpinfo.attrs, action, match_sets) {
-                return PolicyResult::Reject;
+            // The "policy-result" action doesn't modify the route, so
+            // handle it here to keep the route policy info borrowed.
+            if let PolicyAction::Accept(accept) = action {
+                if !*accept {
+                    return PolicyResult::Reject;
+                }
+                continue;
             }
+
+            process_stmt_action(&mut rpinfo.to_mut().attrs, action, match_sets);
         }
     }
 
@@ -328,20 +375,14 @@ fn process_stmt_condition(
     }
 }
 
-// Processes a single action statement within a routing policy.
-//
-// Returns a boolean value indicating whether the route should be accepted or
-// not.
+// Processes a single action statement within a routing policy, updating the
+// route's attributes accordingly.
 fn process_stmt_action(
     attrs: &mut Attrs,
     action: &PolicyAction,
     match_sets: &MatchSets,
-) -> bool {
+) {
     match action {
-        // "policy-result"
-        PolicyAction::Accept(accept) => {
-            return *accept;
-        }
         // "set-metric"
         PolicyAction::SetMetric { value, mod_type } => match mod_type {
             MetricModification::Set => {
@@ -443,8 +484,6 @@ fn process_stmt_action(
         // Ignore unsupported actions.
         _ => {}
     }
-
-    true
 }
 
 // Modifies the list of communities based on the specified method and options.

@@ -115,7 +115,7 @@ pub mod messages {
                 policy_type: PolicyType,
                 nbr_addr: IpAddr,
                 afi_safi: AfiSafi,
-                routes: Vec<(IpNetwork, PolicyResult<RoutePolicyInfo>)>,
+                routes: Vec<(PolicyResult<RoutePolicyInfo>, Vec<IpNetwork>)>,
             },
             Redistribute {
                 afi_safi: AfiSafi,
@@ -180,7 +180,8 @@ pub mod messages {
                 policy_type: PolicyType,
                 nbr_addr: IpAddr,
                 afi_safi: AfiSafi,
-                routes: Vec<(IpNetwork, RoutePolicyInfo)>,
+                prefixes: Vec<IpNetwork>,
+                route: RoutePolicyInfo,
                 #[serde(skip)]
                 policies: Vec<Arc<Policy>>,
                 #[serde(skip)]
@@ -473,7 +474,8 @@ pub(crate) fn policy_apply(
                         policy_type,
                         nbr_addr,
                         afi_safi,
-                        routes,
+                        prefixes,
+                        route,
                         policies,
                         match_sets,
                         default_policy,
@@ -482,7 +484,8 @@ pub(crate) fn policy_apply(
                             policy_type,
                             nbr_addr,
                             afi_safi,
-                            routes,
+                            prefixes,
+                            route,
                             &policies,
                             &match_sets,
                             default_policy,

@@ -145,7 +145,7 @@ struct RouteRef<'a> {
     igp_cost: Option<u32>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[derive(Deserialize, Serialize)]
 pub enum RouteOrigin {
     // Route learned from a neighbor.
@@ -643,7 +643,7 @@ impl RouteOrigin {
 // ===== impl RouteAttrs =====
 
 impl RouteAttrs {
-    fn key(&self) -> RouteAttrsKey {
+    pub(crate) fn key(&self) -> RouteAttrsKey {
         RouteAttrsKey {
             base: self.base.index,
             comm: self.comm.as_ref().map(|c| c.index),
