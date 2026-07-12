@@ -575,8 +575,7 @@ fn process_protocol_msg(
         },
         // Decision process.
         ProtocolInputMsg::TriggerDecisionProcess(_) => {
-            events::decision_process::<Ipv4Unicast>(instance, neighbors)?;
-            events::decision_process::<Ipv6Unicast>(instance, neighbors)?;
+            events::decision_process(instance, neighbors)?;
         }
     }
 

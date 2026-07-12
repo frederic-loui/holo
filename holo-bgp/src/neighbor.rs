@@ -995,7 +995,6 @@ impl Neighbor {
             table,
             routes,
             instance.shared,
-            &mut instance.state.rib.attr_sets,
             &instance.state.policy_apply_tasks,
         );
     }
@@ -1038,8 +1037,10 @@ impl Neighbor {
     {
         let table = A::table(&mut rib.tables);
         for (prefix, dest) in table.prefixes.iter_mut() {
-            // Clear the Adj-RIB-In and Adj-RIB-Out.
-            if let Some(mut adj_rib) = dest.adj_rib.remove(&self.index) {
+            // Clear the Adj-RIB-In and Adj-RIB-Out. Dropping the removed entry
+            // releases its routes; the attribute sets are reclaimed by the
+            // next decision process sweep.
+            if let Some(adj_rib) = dest.adj_rib.remove(&self.index) {
                 // Update nexthop tracking.
                 if let Some(adj_in_route) = adj_rib.in_post() {
                     rib::nexthop_untrack(
@@ -1049,11 +1050,6 @@ impl Neighbor {
                         ibus_tx,
                     );
                 }
-
-                adj_rib.remove_in_pre(&mut rib.attr_sets);
-                adj_rib.remove_in_post(&mut rib.attr_sets);
-                adj_rib.remove_out_pre(&mut rib.attr_sets);
-                adj_rib.remove_out_post(&mut rib.attr_sets);
             }
 
             // Enqueue prefix for the BGP Decision Process.
