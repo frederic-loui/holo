@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use bytes::{Buf, BytesMut};
 use holo_utils::capabilities;
 use holo_utils::ip::{AddressFamily, IpAddrExt, IpAddrKind};
 use holo_utils::socket::{
@@ -245,12 +246,11 @@ pub(crate) async fn nbr_read_loop(
     nbr_msg_rxp: Sender<NbrRxMsg>,
 ) -> Result<(), SendError<NbrRxMsg>> {
     const BUF_SIZE: usize = 65535;
-    let mut buf = [0; BUF_SIZE];
-    let mut data = Vec::with_capacity(BUF_SIZE);
+    let mut data = BytesMut::with_capacity(BUF_SIZE);
 
     loop {
         // Read data from the network.
-        match stream.read(&mut buf).await {
+        match stream.read_buf(&mut data).await {
             Ok(0) => {
                 // Notify that the connection was closed by the remote end.
                 let msg = NbrRxMsg {
@@ -260,7 +260,7 @@ pub(crate) async fn nbr_read_loop(
                 nbr_msg_rxp.send(msg).await?;
                 return Ok(());
             }
-            Ok(num_bytes) => data.extend_from_slice(&buf[..num_bytes]),
+            Ok(_) => {}
             Err(error) => {
                 IoError::TcpRecvError(error).log();
                 continue;
@@ -271,7 +271,7 @@ pub(crate) async fn nbr_read_loop(
         while let Some(msg_size) = Message::get_message_len(&data) {
             let msg = Message::decode(&data[0..msg_size], &cxt)
                 .map_err(NbrRxError::MsgDecodeError);
-            data.drain(..msg_size);
+            data.advance(msg_size);
 
             // Keep track of received capabilities as they influence how some
             // messages should be decoded.

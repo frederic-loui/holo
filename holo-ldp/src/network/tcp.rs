@@ -9,6 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::{Buf, BytesMut};
 use holo_utils::capabilities;
 use holo_utils::socket::{
     OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, TcpConnInfo,
@@ -221,8 +222,7 @@ pub(crate) async fn nbr_read_loop(
     nbr_raddr: IpAddr,
     nbr_pdu_rxp: Sender<NbrRxPduMsg>,
 ) -> Result<(), SendError<NbrRxPduMsg>> {
-    let mut buf = [0; Pdu::MAX_SIZE];
-    let mut data = Vec::with_capacity(Pdu::MAX_SIZE);
+    let mut data = BytesMut::with_capacity(Pdu::MAX_SIZE);
 
     // PDU header validation closure.
     let validate_pdu_hdr = move |lsr_id, label_space| {
@@ -245,7 +245,7 @@ pub(crate) async fn nbr_read_loop(
 
     loop {
         // Read data from the network.
-        match stream.read(&mut buf).await {
+        match stream.read_buf(&mut data).await {
             Ok(0) => {
                 // Notify that the connection was closed by the remote end.
                 let msg = NbrRxPduMsg {
@@ -255,7 +255,7 @@ pub(crate) async fn nbr_read_loop(
                 nbr_pdu_rxp.send(msg).await?;
                 return Ok(());
             }
-            Ok(num_bytes) => data.extend_from_slice(&buf[0..num_bytes]),
+            Ok(_) => {}
             Err(error) => {
                 IoError::TcpRecvError(error).log();
                 continue;
@@ -266,7 +266,7 @@ pub(crate) async fn nbr_read_loop(
         while let Ok(pdu_size) = Pdu::get_pdu_size(&data, &cxt) {
             let pdu = Pdu::decode(&data[0..pdu_size], &cxt)
                 .map_err(|error| Error::NbrPduDecodeError(nbr_lsr_id, error));
-            data.drain(0..pdu_size);
+            data.advance(pdu_size);
 
             // Notify that the LDP message was received.
             let msg = NbrRxPduMsg { nbr_id, pdu };
