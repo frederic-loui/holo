@@ -14,7 +14,7 @@ use holo_utils::bfd::{PathType, State};
 use holo_utils::ibus::IbusMsg;
 use holo_utils::ip::AddressFamily;
 use holo_utils::protocol::Protocol;
-use holo_utils::task::Task;
+use holo_utils::task::{Task, protocol_select};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{Span, debug_span};
@@ -213,7 +213,7 @@ impl UdpRxTasks {
 
 impl MessageReceiver<ProtocolInputMsg> for ProtocolInputChannelsRx {
     async fn recv(&mut self) -> Option<ProtocolInputMsg> {
-        tokio::select! {
+        protocol_select! {
             msg = self.udp_packet_rx.recv() => {
                 msg.map(ProtocolInputMsg::UdpRxPacket)
             }

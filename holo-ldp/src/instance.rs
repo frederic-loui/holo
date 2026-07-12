@@ -16,7 +16,7 @@ use holo_protocol::{
 use holo_utils::ibus::IbusMsg;
 use holo_utils::protocol::Protocol;
 use holo_utils::socket::{TcpListener, UdpSocket};
-use holo_utils::task::Task;
+use holo_utils::task::{Task, protocol_select};
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -433,7 +433,7 @@ impl InstanceState {
 
 impl MessageReceiver<ProtocolInputMsg> for ProtocolInputChannelsRx {
     async fn recv(&mut self) -> Option<ProtocolInputMsg> {
-        tokio::select! {
+        protocol_select! {
             msg = self.udp_pdu_rx.recv() => {
                 msg.map(ProtocolInputMsg::UdpRxPdu)
             }

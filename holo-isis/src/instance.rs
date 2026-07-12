@@ -18,7 +18,7 @@ use holo_protocol::{
 use holo_utils::ibus::IbusMsg;
 use holo_utils::protocol::Protocol;
 use holo_utils::sr::MsdType;
-use holo_utils::task::TimeoutTask;
+use holo_utils::task::{TimeoutTask, protocol_select};
 use ipnetwork::IpNetwork;
 use prefix_trie::joint::map::JointPrefixMap;
 use tokio::sync::mpsc;
@@ -531,8 +531,7 @@ impl ProtocolInputChannelsTx {
 
 impl MessageReceiver<ProtocolInputMsg> for ProtocolInputChannelsRx {
     async fn recv(&mut self) -> Option<ProtocolInputMsg> {
-        tokio::select! {
-            biased;
+        protocol_select! {
             msg = self.adj_init_lsdb_sync.recv() => {
                 msg.map(ProtocolInputMsg::AdjInitLsdbSync)
             }

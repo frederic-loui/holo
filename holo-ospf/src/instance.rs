@@ -17,7 +17,7 @@ use holo_protocol::{
 use holo_utils::ibus::IbusMsg;
 use holo_utils::ip::AddressFamily;
 use holo_utils::protocol::Protocol;
-use holo_utils::task::TimeoutTask;
+use holo_utils::task::{TimeoutTask, protocol_select};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
@@ -669,8 +669,7 @@ where
     V: Version,
 {
     async fn recv(&mut self) -> Option<ProtocolInputMsg<V>> {
-        tokio::select! {
-            biased;
+        protocol_select! {
             msg = self.ism_event.recv() => {
                 msg.map(ProtocolInputMsg::IsmEvent)
             }

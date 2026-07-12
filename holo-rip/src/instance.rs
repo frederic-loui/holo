@@ -16,7 +16,7 @@ use holo_protocol::{
 };
 use holo_utils::ibus::IbusMsg;
 use holo_utils::protocol::Protocol;
-use holo_utils::task::{IntervalTask, TimeoutTask};
+use holo_utils::task::{IntervalTask, TimeoutTask, protocol_select};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
@@ -399,7 +399,7 @@ where
     V: Version,
 {
     async fn recv(&mut self) -> Option<ProtocolInputMsg<V>> {
-        tokio::select! {
+        protocol_select! {
             msg = self.udp_pdu_rx.recv() => {
                 msg.map(ProtocolInputMsg::UdpRxPdu)
             }

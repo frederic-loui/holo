@@ -16,7 +16,7 @@ use holo_utils::ip::AddressFamily;
 use holo_utils::policy::PolicyType;
 use holo_utils::protocol::Protocol;
 use holo_utils::socket::TcpListener;
-use holo_utils::task::{Task, TimeoutTask};
+use holo_utils::task::{Task, TimeoutTask, protocol_select};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
@@ -424,8 +424,7 @@ impl ProtocolInputChannelsTx {
 
 impl MessageReceiver<ProtocolInputMsg> for ProtocolInputChannelsRx {
     async fn recv(&mut self) -> Option<ProtocolInputMsg> {
-        tokio::select! {
-            biased;
+        protocol_select! {
             msg = self.tcp_accept.recv() => {
                 msg.map(ProtocolInputMsg::TcpAccept)
             }

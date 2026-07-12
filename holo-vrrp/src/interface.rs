@@ -18,6 +18,7 @@ use holo_utils::ip::AddressFamily;
 use holo_utils::mac_addr::MacAddr;
 use holo_utils::protocol::Protocol;
 use holo_utils::southbound::InterfaceFlags;
+use holo_utils::task::protocol_select;
 use ipnetwork::IpNetwork;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -253,8 +254,7 @@ impl ProtocolInstance for Interface {
 
 impl MessageReceiver<ProtocolInputMsg> for ProtocolInputChannelsRx {
     async fn recv(&mut self) -> Option<ProtocolInputMsg> {
-        tokio::select! {
-            biased;
+        protocol_select! {
             msg = self.vrrp_net_packet_rx.recv() => {
                 msg.map(ProtocolInputMsg::VrrpNetRxPacket)
             }

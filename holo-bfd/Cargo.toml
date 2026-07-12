@@ -36,7 +36,7 @@ holo-yang = { path = "../holo-yang" }
 criterion.workspace = true
 yang5 = { workspace = true, features = ["bundled"] }
 
-holo-bfd = { path = ".", features = ["testing"] }
+holo-bfd = { path = ".", features = ["testing", "deterministic"] }
 holo-northbound = { path = "../holo-northbound", features = ["testing"] }
 holo-protocol = { path = "../holo-protocol", features = ["testing"] }
 holo-utils = { path = "../holo-utils", features = ["testing"] }
@@ -52,3 +52,4 @@ workspace = true
 [features]
 default = []
 testing = []
+deterministic = []

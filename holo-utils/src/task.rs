@@ -66,6 +66,37 @@ enum Message {
     Reset(Option<Duration>),
 }
 
+/// Variant of `tokio::select!` used to receive protocol input messages.
+///
+/// In deterministic mode, the channels are polled in a fixed order to make
+/// message processing reproducible. During normal operation, they are polled
+/// in random order so a busy channel can't starve the others.
+///
+/// The "deterministic" feature is evaluated in the invoking crate, which must
+/// declare it.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __protocol_select {
+    ($($arms:tt)*) => {{
+        #[cfg(feature = "deterministic")]
+        {
+            ::tokio::select! {
+                biased;
+                $($arms)*
+            }
+        }
+        #[cfg(not(feature = "deterministic"))]
+        {
+            ::tokio::select! {
+                $($arms)*
+            }
+        }
+    }};
+}
+
+#[doc(inline)]
+pub use crate::__protocol_select as protocol_select;
+
 // ===== impl Task =====
 
 impl<T> Task<T> {
