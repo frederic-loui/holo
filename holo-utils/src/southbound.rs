@@ -46,15 +46,15 @@ pub enum Nexthop {
     Address {
         ifindex: u32,
         addr: IpAddr,
-        labels: Vec<Label>,
+        labels: Box<[Label]>,
     },
     Interface {
         ifindex: u32,
     },
     Recursive {
         addr: IpAddr,
-        labels: Vec<Label>,
-        resolved: BTreeSet<Nexthop>,
+        labels: Box<[Label]>,
+        resolved: Box<[Nexthop]>,
     },
 }
 
@@ -220,7 +220,7 @@ impl Nexthop {
     // Removes all labels from a `Nexthop::Address` variant.
     pub fn remove_labels(&mut self) {
         if let Nexthop::Address { labels, .. } = self {
-            *labels = Vec::new();
+            *labels = Default::default();
         }
     }
 

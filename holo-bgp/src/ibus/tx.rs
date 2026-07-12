@@ -35,7 +35,7 @@ pub(crate) fn route_install(
         .flat_map(|nexthops| nexthops.iter())
         .map(|nexthop| Nexthop::Recursive {
             addr: *nexthop,
-            labels: vec![],
+            labels: Default::default(),
             resolved: Default::default(),
         })
         .collect::<BTreeSet<_>>();

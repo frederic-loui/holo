@@ -48,7 +48,7 @@ pub(crate) fn label_install(
         nexthops: [southbound::Nexthop::Address {
             ifindex: nexthop.ifindex.unwrap(),
             addr: nexthop.addr,
-            labels: vec![remote_label],
+            labels: [remote_label].into(),
         }]
         .into(),
         route: Some((protocol, *fec.prefix)),
@@ -82,7 +82,7 @@ pub(crate) fn label_uninstall(
         nexthops: [southbound::Nexthop::Address {
             ifindex: nexthop.ifindex.unwrap(),
             addr: nexthop.addr,
-            labels: vec![remote_label],
+            labels: [remote_label].into(),
         }]
         .into(),
         route: Some((protocol, *fec.prefix)),

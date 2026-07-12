@@ -38,7 +38,7 @@ pub(crate) fn route_install<V>(
         nexthops: [Nexthop::Address {
             ifindex: route.ifindex,
             addr: route.nexthop.unwrap().into(),
-            labels: Vec::new(),
+            labels: Default::default(),
         }]
         .into(),
     };
