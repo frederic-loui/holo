@@ -126,7 +126,13 @@ pub(crate) fn process_nbr_msg(
                 }
                 Message::Update(msg) => {
                     nbr.fsm_event(instance, fsm::Event::RcvdUpdate);
-                    process_nbr_update(instance, nbr, msg)?;
+                    // An UPDATE message is only valid once the session reaches
+                    // the Established state (RFC 4271 Section 8.2.2). Processing
+                    // its NLRI beforehand has no negotiated capabilities and no
+                    // neighbor identifier to work with, which would panic.
+                    if nbr.state == fsm::State::Established {
+                        process_nbr_update(instance, nbr, msg)?;
+                    }
                 }
                 Message::Notification(msg) => {
                     nbr.fsm_event(instance, fsm::Event::RcvdNotif(msg.clone()));
