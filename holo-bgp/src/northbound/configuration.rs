@@ -807,6 +807,9 @@ fn load_callbacks() -> Callbacks<Instance> {
 
             let enabled = args.dnode.get_bool();
             nbr.config.enabled = enabled;
+
+            let event_queue = args.event_queue;
+            event_queue.insert(Event::NeighborUpdate(nbr_addr));
         })
         .path(bgp::neighbors::neighbor::peer_as::PATH)
         .modify_apply(|instance, args| {
