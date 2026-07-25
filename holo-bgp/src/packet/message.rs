@@ -742,20 +742,29 @@ impl UpdateMsg {
         // Path Attributes.
         let start_pos = buf.len();
         buf.put_u16(0);
-        if let Some(attrs) = &self.attrs {
-            // Encode path attributes.
-            attrs.encode(
-                buf,
-                &self.reach,
-                &self.mp_reach,
-                &self.mp_unreach,
-                cxt,
-            );
-
-            // Rewrite the "Total Path Attribute Length" field.
-            let len = (buf.len() - start_pos - 2) as u16;
-            buf[start_pos..start_pos + 2].copy_from_slice(&len.to_be_bytes());
+        match (&self.attrs, &self.mp_unreach) {
+            // Encode the full set of path attributes.
+            (Some(attrs), _) => {
+                attrs.encode(
+                    buf,
+                    &self.reach,
+                    &self.mp_reach,
+                    &self.mp_unreach,
+                    cxt,
+                );
+            }
+            // A withdraw-only UPDATE for a non-IPv4-unicast address family
+            // carries MP_UNREACH_NLRI as its only path attribute. It must still
+            // be encoded when no other attributes are present; otherwise the
+            // message has an empty attribute section and is indistinguishable
+            // from an End-of-RIB marker, so the withdrawal is never signaled.
+            (None, Some(mp_unreach)) => mp_unreach.encode(buf),
+            (None, None) => {}
         }
+
+        // Rewrite the "Total Path Attribute Length" field.
+        let len = (buf.len() - start_pos - 2) as u16;
+        buf[start_pos..start_pos + 2].copy_from_slice(&len.to_be_bytes());
 
         // Network Layer Reachability Information.
         if let Some(reach) = &self.reach {
