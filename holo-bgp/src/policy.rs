@@ -167,7 +167,6 @@ fn process_policies<'a>(
     match_sets: &MatchSets,
     default_policy: DefaultPolicyType,
 ) -> PolicyResult<Cow<'a, RoutePolicyInfo>> {
-    let mut matches = false;
     let mut rpinfo = Cow::Borrowed(rpinfo);
 
     for stmt in policies.iter().flat_map(|policy| policy.stmts.values()) {
@@ -180,16 +179,16 @@ fn process_policies<'a>(
             continue;
         }
 
-        matches = true;
-
         // Process actions defined in the policy statement.
+        let mut accept = false;
         for action in stmt.actions.values() {
             // The "policy-result" action doesn't modify the route, so
             // handle it here to keep the route policy info borrowed.
-            if let PolicyAction::Accept(accept) = action {
-                if !*accept {
+            if let PolicyAction::Accept(value) = action {
+                if !*value {
                     return PolicyResult::Reject;
                 }
+                accept = true;
                 continue;
             }
 
@@ -200,11 +199,17 @@ fn process_policies<'a>(
                 match_sets,
             );
         }
+
+        // An "accept-route" action terminates the evaluation of the policy
+        // chain.
+        if accept {
+            return PolicyResult::Accept(rpinfo);
+        }
     }
 
-    // Check default policy if no definition in the policy chain was
-    // satisfied.
-    if !matches && default_policy == DefaultPolicyType::RejectRoute {
+    // Apply the default policy once the end of the policy chain is reached
+    // without a final route disposition.
+    if default_policy == DefaultPolicyType::RejectRoute {
         return PolicyResult::Reject;
     }
 
