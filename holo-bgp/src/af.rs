@@ -50,7 +50,11 @@ pub trait AddressFamily: Sized {
     fn nexthop_rx_extract(attrs: &BaseAttrs) -> IpAddr;
 
     // Modify the next hop(s) for transmission.
-    fn nexthop_tx_change(nbr: &Neighbor, local: bool, attrs: &mut BaseAttrs);
+    fn nexthop_tx_change(
+        nbr: &Neighbor,
+        nexthop_self: bool,
+        attrs: &mut BaseAttrs,
+    );
 
     // Build BGP UPDATE messages based on the provided update queue.
     fn build_updates(queue: &mut NeighborUpdateQueue<Self>) -> Vec<Message>;
@@ -86,7 +90,11 @@ impl AddressFamily for Ipv4Unicast {
         attrs.nexthop.unwrap()
     }
 
-    fn nexthop_tx_change(nbr: &Neighbor, local: bool, attrs: &mut BaseAttrs) {
+    fn nexthop_tx_change(
+        nbr: &Neighbor,
+        nexthop_self: bool,
+        attrs: &mut BaseAttrs,
+    ) {
         // Get source address of the BGP session.
         let session_src = match nbr.conn_info.as_ref().unwrap().local_addr {
             IpAddr::V4(addr) => {
@@ -101,8 +109,8 @@ impl AddressFamily for Ipv4Unicast {
             }
         };
 
-        // Handle locally originated routes.
-        if local {
+        // Use the source address of the session as next hop.
+        if nexthop_self {
             attrs.nexthop = Some(session_src.into());
             return;
         }
@@ -196,7 +204,11 @@ impl AddressFamily for Ipv6Unicast {
             .unwrap_or(attrs.nexthop.unwrap())
     }
 
-    fn nexthop_tx_change(nbr: &Neighbor, local: bool, attrs: &mut BaseAttrs) {
+    fn nexthop_tx_change(
+        nbr: &Neighbor,
+        nexthop_self: bool,
+        attrs: &mut BaseAttrs,
+    ) {
         // Get source address of the BGP session.
         let session_src = match nbr.conn_info.as_ref().unwrap().local_addr {
             IpAddr::V4(addr) => {
@@ -209,8 +221,8 @@ impl AddressFamily for Ipv6Unicast {
             }
         };
 
-        // Handle locally originated routes.
-        if local {
+        // Use the source address of the session as next hop.
+        if nexthop_self {
             attrs.nexthop = Some(session_src.into());
             if nbr.shared_subnet {
                 // TODO: update link-local next hop.

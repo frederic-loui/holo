@@ -31,7 +31,7 @@ pub struct ApplyPolicyCfg {
     pub default_export_policy: DefaultPolicyType,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[derive(Deserialize, Serialize)]
 pub enum PolicyType {
     Import,

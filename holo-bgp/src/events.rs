@@ -566,7 +566,7 @@ where
 
                 // Update route's attributes before transmission.
                 let mut attrs = rpinfo.attrs;
-                rib::attrs_tx_update(&mut attrs, nbr, instance.config.asn);
+                rib::attrs_tx_update::<A>(&mut attrs, nbr, instance.config.asn);
 
                 let mut advertise = vec![];
                 for prefix in prefixes {

@@ -1064,17 +1064,19 @@ pub(crate) fn attrs_export_update<A>(
         }
     }
 
-    // Update the next-hop attribute based on the address family if necessary.
+    // Update the next hop according to the route origin and the peer type.
     A::nexthop_tx_change(nbr, local, &mut attrs.base);
 }
 
 // Updates route attributes at transmission time, after export policies were
 // applied. These updates are mandatory and can't be overwritten by policies.
-pub(crate) fn attrs_tx_update(
+pub(crate) fn attrs_tx_update<A>(
     attrs: &mut Attrs,
     nbr: &Neighbor,
     local_asn: u32,
-) {
+) where
+    A: AddressFamily,
+{
     if let PeerType::External = nbr.peer_type {
         // Prepend local AS number.
         attrs.base.as_path.prepend(local_asn);
@@ -1082,6 +1084,12 @@ pub(crate) fn attrs_tx_update(
         // Remove the LOCAL_PREF attribute in case an export policy has set
         // it, as it can't be sent to external peers.
         attrs.base.local_pref = None;
+    }
+
+    // An unset next hop at this point means an export policy requested next
+    // hop self. Resolve it to the source address of the session.
+    if attrs.base.nexthop.is_none() {
+        A::nexthop_tx_change(nbr, true, &mut attrs.base);
     }
 }
 

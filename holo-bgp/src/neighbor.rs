@@ -1040,7 +1040,11 @@ impl Neighbor {
             let (_, prefixes) =
                 groups.entry(route.attrs.key()).or_insert_with(|| {
                     let mut attrs = route.attrs.get();
-                    rib::attrs_tx_update(&mut attrs, self, instance.config.asn);
+                    rib::attrs_tx_update::<A>(
+                        &mut attrs,
+                        self,
+                        instance.config.asn,
+                    );
                     (attrs, vec![])
                 });
             prefixes.push(prefix);
