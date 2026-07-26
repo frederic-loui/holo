@@ -21,6 +21,7 @@ pub enum Error {
     // Message processing
     NbrBadAs(IpAddr, u32, u32),
     NbrBadIdentifier(IpAddr, Ipv4Addr),
+    UpdateAttrsTooLong(u16),
     // Other
     InstanceStartError(Box<Error>),
 }
@@ -68,6 +69,9 @@ impl Error {
                     warn!(%identifier, "{}", self);
                 });
             }
+            Error::UpdateAttrsTooLong(length) => {
+                warn!(%length, "{}", self);
+            }
             Error::InstanceStartError(error) => {
                 error!(error = %with_source(error), "{}", self);
             }
@@ -85,6 +89,12 @@ impl std::fmt::Display for Error {
             }
             Error::NbrBadIdentifier(..) => {
                 write!(f, "BGP identifier conflict")
+            }
+            Error::UpdateAttrsTooLong(..) => {
+                write!(
+                    f,
+                    "path attributes too long to fit in an UPDATE message"
+                )
             }
             Error::InstanceStartError(..) => {
                 write!(f, "failed to start instance")

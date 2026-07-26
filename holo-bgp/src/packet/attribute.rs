@@ -566,6 +566,16 @@ impl Attrs {
         if let Some(large_comm) = &self.large_comm {
             length += large_comm.length();
         }
+        if let Some(unknown) = &self.unknown {
+            for unknown_attr in unknown.iter() {
+                length += if unknown_attr.flags.contains(AttrFlags::EXTENDED) {
+                    ATTR_MIN_LEN_EXT
+                } else {
+                    ATTR_MIN_LEN
+                };
+                length += unknown_attr.value.len() as u16;
+            }
+        }
 
         length
     }
