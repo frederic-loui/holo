@@ -233,6 +233,8 @@ pub mod fsm {
         RcvdKalive,
         // UpdateMsg
         RcvdUpdate,
+        // RouteRefreshMsg (not an RFC 4271 event)
+        RcvdRouteRefresh,
         // ConnectRetryTimer_Expires
         // HoldTimer_Expires
         // AutomaticStart
@@ -505,6 +507,7 @@ impl Neighbor {
                     self.holdtime_restart();
                     None
                 }
+                fsm::Event::RcvdRouteRefresh => None,
                 fsm::Event::Timer(fsm::Timer::Hold) => {
                     let error_code = ErrorCode::HoldTimerExpired;
                     let error_subcode = 0;
