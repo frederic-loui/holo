@@ -742,24 +742,24 @@ impl UpdateMsg {
         // Path Attributes.
         let start_pos = buf.len();
         buf.put_u16(0);
-        match (&self.attrs, &self.mp_unreach) {
-            // Encode the full set of path attributes.
-            (Some(attrs), _) => {
-                attrs.encode(
-                    buf,
-                    &self.reach,
-                    &self.mp_reach,
-                    &self.mp_unreach,
-                    cxt,
-                );
-            }
-            // A withdraw-only UPDATE for a non-IPv4-unicast address family
-            // carries MP_UNREACH_NLRI as its only path attribute. It must still
-            // be encoded when no other attributes are present; otherwise the
-            // message has an empty attribute section and is indistinguishable
-            // from an End-of-RIB marker, so the withdrawal is never signaled.
-            (None, Some(mp_unreach)) => mp_unreach.encode(buf),
-            (None, None) => {}
+
+        // RFC 7606 - Section 5.1:
+        // "The MP_REACH_NLRI or MP_UNREACH_NLRI attribute (if present) SHALL
+        // be encoded as the very first path attribute in an UPDATE message".
+        //
+        // Both are attributes of the message rather than of `Attrs`, and are
+        // encoded here so that they don't depend on any other attribute being
+        // present.
+        if let Some(mp_reach) = &self.mp_reach {
+            mp_reach.encode(buf);
+        }
+        if let Some(mp_unreach) = &self.mp_unreach {
+            mp_unreach.encode(buf);
+        }
+
+        // Encode the remaining path attributes.
+        if let Some(attrs) = &self.attrs {
+            attrs.encode(buf, &self.reach, cxt);
         }
 
         // Rewrite the "Total Path Attribute Length" field.

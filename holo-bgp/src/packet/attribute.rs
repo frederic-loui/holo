@@ -156,24 +156,12 @@ impl Attrs {
         &self,
         buf: &mut BytesMut,
         reach: &Option<ReachNlri>,
-        mp_reach: &Option<MpReachNlri>,
-        mp_unreach: &Option<MpUnreachNlri>,
         cxt: &EncodeCxt,
     ) {
         // Check whether the 4-octet AS number capability has been negotiated.
         let four_byte_asn_cap = cxt
             .capabilities
             .contains(&NegotiatedCapability::FourOctetAsNumber);
-
-        // RFC 7606 - Section 5.1:
-        // "The MP_REACH_NLRI or MP_UNREACH_NLRI attribute (if present) SHALL
-        // be encoded as the very first path attribute in an UPDATE message".
-        if let Some(mp_reach) = mp_reach {
-            mp_reach.encode(buf);
-        }
-        if let Some(mp_unreach) = mp_unreach {
-            mp_unreach.encode(buf);
-        }
 
         // RFC 4271 - Section 5:
         // "The sender of an UPDATE message SHOULD order path attributes within
@@ -1127,7 +1115,7 @@ impl ClusterList {
 impl MpReachNlri {
     pub const MIN_LEN: u16 = 5;
 
-    fn encode(&self, buf: &mut BytesMut) {
+    pub(crate) fn encode(&self, buf: &mut BytesMut) {
         buf.put_u8((AttrFlags::OPTIONAL | AttrFlags::EXTENDED).bits());
         buf.put_u8(AttrType::MpReachNlri as u8);
 
