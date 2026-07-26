@@ -449,6 +449,11 @@ impl Neighbor {
                 }
                 fsm::Event::RcvdOpen(_msg) => {
                     // TODO: collision detection
+                    let error_code = ErrorCode::FiniteStateMachineError;
+                    let error_subcode =
+                        FsmErrorSubcode::UnexpectedMessageInOpenConfirm;
+                    let msg = NotificationMsg::new(error_code, error_subcode);
+                    self.session_close(rib, instance.tx, Some(msg));
                     Some(fsm::State::Idle)
                 }
                 fsm::Event::RcvdNotif(_) => {
