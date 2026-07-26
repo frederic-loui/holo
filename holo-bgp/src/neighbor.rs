@@ -36,7 +36,7 @@ use crate::packet::message::{
     Capability, DecodeCxt, EncodeCxt, KeepaliveMsg, Message,
     NegotiatedCapability, NotificationMsg, OpenMsg, RouteRefreshMsg,
 };
-use crate::rib::{BestRoute, Rib, RouteOrigin};
+use crate::rib::{BestRoute, Rib};
 #[cfg(feature = "testing")]
 use crate::tasks::messages::ProtocolOutputMsg;
 use crate::tasks::messages::input::{NbrTimerMsg, TcpConnectMsg};
@@ -1147,8 +1147,8 @@ impl Neighbor {
         // routing information contained in that UPDATE message to other
         // internal peers".
         if route.route_type == RouteType::Internal
-            && let RouteOrigin::Neighbor { remote_addr, .. } = &route.origin
-            && *remote_addr == self.remote_addr
+            && !route.origin.is_local()
+            && self.peer_type == PeerType::Internal
         {
             return false;
         }
