@@ -8,7 +8,7 @@ pub mod serde;
 pub mod types;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock as Lazy, OnceLock};
 
 use maplit::hashmap;
@@ -491,12 +491,44 @@ pub fn new_context() -> Context {
 }
 
 // Loads the given YANG modules and their associated deviations.
+//
+// All modules are loaded at once so that the schema trees are compiled a
+// single time.
 pub fn load_modules(ctx: &mut Context, modules: &[&str]) {
-    for module_name in modules.iter() {
-        load_module(ctx, module_name);
-    }
-    for module_name in modules.iter() {
-        load_deviations(ctx, module_name);
+    // Names of all embedded YANG modules.
+    static EMBEDDED_MODULE_NAMES: Lazy<HashSet<&'static str>> =
+        Lazy::new(|| {
+            YANG_EMBEDDED_MODULES
+                .keys()
+                .map(|key| key.mod_name())
+                .collect()
+        });
+
+    let mut load = modules
+        .iter()
+        .map(|name| {
+            let features = YANG_FEATURES
+                .get(name)
+                .map(|features| features.as_slice())
+                .unwrap_or_else(|| &[]);
+            (*name, None, features)
+        })
+        .collect::<Vec<_>>();
+
+    // Not all modules have deviations. Requesting one that doesn't exist needs
+    // to be avoided, since a failed load discards the whole batch.
+    load.extend(
+        modules
+            .iter()
+            .filter_map(|name| {
+                let name = format!("holo-{name}-deviations");
+                EMBEDDED_MODULE_NAMES.get(name.as_str()).copied()
+            })
+            .map(|name| (name, None, &[] as &[&str])),
+    );
+
+    if let Err(error) = ctx.load_modules(&load) {
+        panic!("failed to load YANG modules: {error}");
     }
 }
 
