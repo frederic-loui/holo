@@ -4,6 +4,9 @@
 // SPDX-License-Identifier: MIT
 //
 
+use std::net::SocketAddr;
+use std::os::fd::AsFd;
+use std::path::{Path as FsPath, PathBuf};
 use std::pin::Pin;
 use std::time::SystemTime;
 
@@ -11,10 +14,13 @@ use futures::Stream;
 use holo_northbound::{Path, PathElem};
 use holo_utils::task::Task;
 use holo_yang::{YANG_CTX, YANG_FEATURES};
+use nix::sys::stat::{Mode, fchmod};
+use tokio::net::UnixListener;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tonic::transport::{Server, ServerTlsConfig};
+use tokio_stream::wrappers::{UnboundedReceiverStream, UnixListenerStream};
+use tonic::transport::server::Router;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use tracing::{error, trace, trace_span};
 use yang5::data::{
@@ -34,6 +40,13 @@ mod proto {
 
 struct NorthboundService {
     request_tx: Sender<api::client::Request>,
+}
+
+// Where a server accepts connections.
+#[derive(Debug)]
+pub(crate) enum Listener {
+    Tcp(SocketAddr),
+    Unix(PathBuf),
 }
 
 // ===== impl proto::Northbound =====
@@ -572,6 +585,16 @@ impl From<proto::PathElem> for PathElem {
 
 // ===== helper functions =====
 
+fn read_pem(path: &str, name: &str) -> Vec<u8> {
+    match std::fs::read(path) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("failed to read the {name} {path}: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn get_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -703,53 +726,97 @@ fn rpc_get(data_tree: &proto::DataTree) -> Result<DataTree<'static>, Status> {
     .map_err(|error| Status::invalid_argument(error.to_string()))
 }
 
+// Binds the Unix socket, restricting it to the user and group holod runs as.
+fn unix_listener(path: &FsPath) -> std::io::Result<UnixListenerStream> {
+    // A socket left behind by a previous run would make the bind fail.
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(error);
+        }
+        _ => {}
+    }
+
+    let listener = UnixListener::bind(path)?;
+    // Add the write access left out by the umask.
+    fchmod(listener.as_fd(), Mode::from_bits_truncate(0o660))?;
+
+    Ok(UnixListenerStream::new(listener))
+}
+
 // ===== global functions =====
+
+// Sets up the listener and the server for the given address.
+//
+// An address starting with a slash is taken as the path of a Unix socket.
+pub(crate) fn server_init(
+    name: &str,
+    address: &str,
+    tls: &config::Tls,
+) -> (Listener, Server) {
+    let listener = match address.starts_with('/') {
+        true => Listener::Unix(PathBuf::from(address)),
+        false => match address.parse::<SocketAddr>() {
+            Ok(address) => Listener::Tcp(address),
+            Err(error) => {
+                error!(%error, "failed to parse {name} server address");
+                std::process::exit(1);
+            }
+        },
+    };
+
+    let server = Server::builder();
+    let server = match tls.enabled {
+        true => {
+            let cert = read_pem(&tls.certificate, "TLS certificate");
+            let key = read_pem(&tls.key, "TLS key");
+            let identity = Identity::from_pem(cert, key);
+            let tls_config = ServerTlsConfig::new().identity(identity);
+            match server.tls_config(tls_config) {
+                Ok(server) => server,
+                Err(error) => {
+                    error!(%error, "failed to setup {name} TLS");
+                    std::process::exit(1);
+                }
+            }
+        }
+        false => server,
+    };
+
+    (listener, server)
+}
+
+// Binds the listener and serves requests, terminating the daemon on failure.
+pub(crate) async fn serve(name: &str, listener: Listener, router: Router) {
+    let result = match listener {
+        Listener::Tcp(address) => router.serve(address).await,
+        Listener::Unix(path) => match unix_listener(&path) {
+            Ok(incoming) => router.serve_with_incoming(incoming).await,
+            Err(error) => {
+                error!(%error, path = %path.display(), "failed to bind {name} socket");
+                std::process::exit(1);
+            }
+        },
+    };
+    if let Err(error) = result {
+        error!(%error, "failed to start {name} service");
+        std::process::exit(1);
+    }
+}
 
 pub(crate) fn start(
     config: &config::Grpc,
     request_tx: Sender<api::client::Request>,
 ) -> Task<()> {
-    let address = config
-        .address
-        .parse()
-        .expect("Failed to parse gRPC server address");
+    let (listener, mut server) =
+        server_init("gRPC", &config.address, &config.tls);
     let service = NorthboundService { request_tx };
-
-    let server = Server::builder();
-    let mut server = match config.tls.enabled {
-        true => {
-            let cert = match std::fs::read(&config.tls.certificate) {
-                Ok(value) => value,
-                Err(error) => {
-                    error!(%error, "failed to read TLS certificate");
-                    std::process::exit(1);
-                }
-            };
-            let key = match std::fs::read(&config.tls.key) {
-                Ok(value) => value,
-                Err(error) => {
-                    error!(%error, "failed to read TLS key");
-                    std::process::exit(1);
-                }
-            };
-
-            let identity = tonic::transport::Identity::from_pem(cert, key);
-            server
-                .tls_config(ServerTlsConfig::new().identity(identity))
-                .expect("Failed to setup gRPC TLS")
-        }
-        false => server,
-    };
+    let router = server.add_service(
+        proto::NorthboundServer::new(service)
+            .max_encoding_message_size(usize::MAX)
+            .max_decoding_message_size(usize::MAX),
+    );
 
     Task::spawn(async move {
-        server
-            .add_service(
-                proto::NorthboundServer::new(service)
-                    .max_encoding_message_size(usize::MAX)
-                    .max_decoding_message_size(usize::MAX),
-            )
-            .serve(address)
-            .await
-            .expect("Failed to start gRPC service");
+        serve("gRPC", listener, router).await;
     })
 }

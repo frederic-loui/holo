@@ -42,7 +42,8 @@ $ cargo build --release
 # chmod 0750 /var/opt/holo /var/log/holo
 ```
 
-`holod` runs as the `holo` user and the `holoadm` group, so the log files and the database are group-owned by `holoadm`.
+`holod` runs as the `holo` user and the `holoadm` group, so the log files, the database and the gRPC local socket are all group-owned by `holoadm`.
+Its members get the access `holo-cli` needs without being root.
 
 6. Installation
 

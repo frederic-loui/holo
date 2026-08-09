@@ -13,14 +13,13 @@ use itertools::join;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{error, trace, trace_span};
+use tracing::{trace, trace_span};
 use yang5::data::{Data, DataFormat, DataPrinterFlags, DataTree};
 use yang5::schema::SchemaNodeKind;
 
 use crate::config;
-use crate::northbound::client::api;
+use crate::northbound::client::{api, grpc};
 
 const GNMI_VERSION: &str = "0.8.1";
 
@@ -509,47 +508,16 @@ pub(crate) fn start(
     config: &config::Gnmi,
     request_tx: Sender<api::client::Request>,
 ) -> Task<()> {
-    let address = config
-        .address
-        .parse()
-        .expect("Failed to parse gNMI server address");
+    let (listener, mut server) =
+        grpc::server_init("gNMI", &config.address, &config.tls);
     let service = GNmiService { request_tx };
-
-    let server = Server::builder();
-    let mut server = match config.tls.enabled {
-        true => {
-            let cert = match std::fs::read(&config.tls.certificate) {
-                Ok(value) => value,
-                Err(error) => {
-                    error!(%error, "failed to read TLS certificate");
-                    std::process::exit(1);
-                }
-            };
-            let key = match std::fs::read(&config.tls.key) {
-                Ok(value) => value,
-                Err(error) => {
-                    error!(%error, "failed to read TLS key");
-                    std::process::exit(1);
-                }
-            };
-
-            let identity = tonic::transport::Identity::from_pem(cert, key);
-            server
-                .tls_config(ServerTlsConfig::new().identity(identity))
-                .expect("Failed to setup gNMI TLS")
-        }
-        false => server,
-    };
+    let router = server.add_service(
+        proto::GNmiServer::new(service)
+            .max_encoding_message_size(usize::MAX)
+            .max_decoding_message_size(usize::MAX),
+    );
 
     Task::spawn(async move {
-        server
-            .add_service(
-                proto::GNmiServer::new(service)
-                    .max_encoding_message_size(usize::MAX)
-                    .max_decoding_message_size(usize::MAX),
-            )
-            .serve(address)
-            .await
-            .expect("Failed to start gNMI service");
+        grpc::serve("gNMI", listener, router).await;
     })
 }

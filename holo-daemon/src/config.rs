@@ -198,7 +198,7 @@ impl Default for Grpc {
     fn default() -> Grpc {
         Grpc {
             enabled: true,
-            address: "0.0.0.0:50051".to_owned(),
+            address: "/var/opt/holo/holod.sock".to_owned(),
             tls: Default::default(),
         }
     }

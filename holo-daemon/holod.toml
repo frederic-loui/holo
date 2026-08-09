@@ -60,8 +60,8 @@ database_path = "/var/opt/holo/holo.db"
   [plugins.grpc]
     # Enable or disable the plugin
     enabled = true
-    # gRPC server listening address
-    address = "0.0.0.0:50051"
+    # gRPC server listening address, or the path of a Unix socket
+    address = "/var/opt/holo/holod.sock"
     # Optional gRPC TLS configuration
     [plugins.grpc.tls]
       # Enable or disable TLS authentication
