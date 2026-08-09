@@ -13,8 +13,7 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::sync::atomic;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF};
 use holo_utils::ip::{AddressFamily, Ipv4AddrExt};
 use internet_checksum::Checksum;
 use num_traits::FromPrimitive;

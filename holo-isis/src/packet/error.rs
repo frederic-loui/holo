@@ -7,7 +7,7 @@
 // See: https://nlnet.nl/NGI0
 //
 
-use bytes::TryGetError;
+use holo_utils::bytes::TryGetError;
 use holo_utils::mpls::Label;
 use serde::{Deserialize, Serialize};
 use tracing::{Span, warn};

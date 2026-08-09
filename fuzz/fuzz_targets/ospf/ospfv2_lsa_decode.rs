@@ -8,9 +8,9 @@
 //
 #![no_main]
 
-use bytes::Bytes;
 use holo_ospf::packet::lsa::Lsa;
 use holo_ospf::version::Ospfv2;
+use holo_utils::bytes::Bytes;
 use holo_utils::ip::AddressFamily;
 use libfuzzer_sys::fuzz_target;
 

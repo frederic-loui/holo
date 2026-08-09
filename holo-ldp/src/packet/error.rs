@@ -6,7 +6,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use bytes::{Bytes, TryGetError};
+use holo_utils::bytes::{Bytes, TryGetError};
 use serde::{Deserialize, Serialize};
 
 use crate::packet::message::MessageDecodeInfo;

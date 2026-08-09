@@ -7,8 +7,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::ip::{Ipv4AddrExt, Ipv6AddrExt};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;

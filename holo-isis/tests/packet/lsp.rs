@@ -1026,8 +1026,8 @@ fn test_decode_lsp6_mt_cap() {
 
 #[test]
 fn test_decode_lsp_crypto_auth_short_digest() {
-    use bytes::Bytes;
     use holo_isis::packet::auth::AuthMethod;
+    use holo_utils::bytes::Bytes;
 
     // Craft an LSP PDU whose Cryptographic Authentication TLV is the last
     // TLV in the PDU and declares a length that leaves no room for the
@@ -1055,8 +1055,7 @@ fn test_decode_lsp_crypto_auth_short_digest() {
 
 #[test]
 fn test_decode_lsp_short_pdu_length() {
-    use bytes::Bytes;
-
+    use holo_utils::bytes::Bytes;
     // Craft an LSP whose `pdu_len` field declares a length smaller than the
     // fixed LSP header (27 bytes).
     let bytes = vec![

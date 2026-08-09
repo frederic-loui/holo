@@ -5,10 +5,9 @@
 //
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use derive_new::new;
 use holo_utils::bfd::State;
-use holo_utils::bytes::TLS_BUF;
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF, TryGetError};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};

@@ -6,8 +6,8 @@
 
 use std::net::Ipv4Addr;
 
-use bytes::{Buf, Bytes};
 use const_addrs::ip4;
+use holo_utils::bytes::Bytes;
 use holo_utils::capabilities;
 use holo_utils::socket::{RawSocketExt, Socket};
 use ipnetwork::Ipv4Network;
@@ -167,7 +167,7 @@ impl NetworkVersion<Self> for Ospfv2 {
         }
 
         // Move past the IP header.
-        buf.advance(((hdr_len << 2) - 4) as usize);
+        buf.try_advance(((hdr_len << 2) - 4) as usize)?;
 
         Ok(())
     }

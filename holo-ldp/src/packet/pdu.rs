@@ -7,8 +7,7 @@
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF};
 use serde::{Deserialize, Serialize};
 
 use crate::packet::DecodeCxt;
@@ -101,24 +100,24 @@ impl Pdu {
 
                 // Check if the maximum PDU length was exceeded.
                 if buf.len() > max_pdu_len as usize {
-                    let mut new_msg = buf.split_to(len);
-                    std::mem::swap(&mut new_msg, &mut buf);
+                    // Move the message that didn't fit to a separate buffer.
+                    let new_msg = buf.try_split_off(len).unwrap_or_default();
 
                     // Add full PDU.
                     Pdu::init_pdu_length(&mut buf);
-                    buf_final.extend(buf.clone());
+                    buf_final.put_slice(&buf);
 
                     // Prepare other PDU.
                     buf.clear();
                     self.encode_hdr(&mut buf);
-                    buf.extend(new_msg);
+                    buf.put_slice(&new_msg);
                 }
 
                 // Check if this is the last message.
                 if msgs.peek().is_none() {
                     // Add full PDU.
                     Pdu::init_pdu_length(&mut buf);
-                    buf_final.extend(buf.clone());
+                    buf_final.put_slice(&buf);
                 }
             }
         });
@@ -167,7 +166,7 @@ impl Pdu {
         cxt: &DecodeCxt,
     ) -> DecodeResult<PduDecodeInfo> {
         let buf_size = buf.len();
-        let buf_copy = buf.clone();
+        let mut buf_copy = buf.clone();
 
         // Parse and validate LDP version.
         let version = buf.try_get_u16()?;
@@ -188,7 +187,7 @@ impl Pdu {
 
         // Save slice containing the entire PDU.
         let pdu_size = pdu_len + Pdu::HDR_DEAD_LEN;
-        let pdu_raw = buf_copy.slice(0..pdu_size as usize);
+        let pdu_raw = buf_copy.try_copy_to_bytes(pdu_size as usize)?;
 
         // Calculate remaining bytes in the PDU.
         let pdu_rlen = pdu_len - Pdu::HDR_MIN_LEN;

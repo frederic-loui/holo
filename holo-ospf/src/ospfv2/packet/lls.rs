@@ -6,8 +6,8 @@
 
 use std::sync::atomic::Ordering;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
+use holo_utils::bytes::{Bytes, BytesMut};
 use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
 
@@ -125,7 +125,7 @@ impl CryptoAuthTlv {
         }
         let seqno = buf.try_get_u32()?;
         let auth_data_len = tlv_len - 4;
-        let auth_data = buf.slice(..auth_data_len as usize);
+        let auth_data = buf.try_copy_to_bytes(auth_data_len as usize)?;
 
         Ok(CryptoAuthTlv { seqno, auth_data })
     }
@@ -179,7 +179,7 @@ impl LlsVersion<Self> for Ospfv2 {
         // The authentication digest has already been verified earlier, so no
         // need for a double check here.
         if let PacketHdrAuth::Cryptographic { auth_len, .. } = hdr_auth {
-            buf.advance(auth_len as usize);
+            buf.try_advance(auth_len as usize)?;
         } else {
             // Validate LLS block checksum when authentication is disabled.
             Self::verify_cksum(&buf)?;
@@ -205,8 +205,8 @@ impl LlsVersion<Self> for Ospfv2 {
         if block_len > buf.remaining() {
             return Err(DecodeError::InvalidLength(block_len as u16));
         }
-        buf = buf.slice(0..block_len);
-        data = data.slice(0..block_len + LLS_HDR_SIZE as usize);
+        buf.truncate(block_len);
+        data.truncate(block_len + LLS_HDR_SIZE as usize);
 
         while buf.remaining() >= LLS_HDR_SIZE as usize {
             // Parse TLV type.
@@ -221,7 +221,7 @@ impl LlsVersion<Self> for Ospfv2 {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(LlsTlvType::ExtendedOptionsFlags) => {
                     let opts =

@@ -14,7 +14,7 @@ pub mod pdu;
 pub mod subtlvs;
 pub mod tlv;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
+use holo_utils::bytes::{Bytes, BytesMut, TryGetError};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 

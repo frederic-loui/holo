@@ -8,9 +8,8 @@ use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use arbitrary::Arbitrary;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_as_inner::EnumAsInner;
-use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF};
 use holo_utils::ip::{
     Ipv4AddrExt, Ipv4NetworkExt, Ipv6AddrExt, Ipv6NetworkExt,
 };
@@ -475,7 +474,7 @@ impl OpenMsg {
         if opt_param_len as usize > buf.remaining() {
             return Err(OpenMessageError::MalformedOptParam);
         }
-        let mut buf_opts = buf.copy_to_bytes(opt_param_len as usize);
+        let mut buf_opts = buf.try_copy_to_bytes(opt_param_len as usize)?;
         while buf_opts.remaining() > 0 {
             if buf_opts.remaining() < 2 {
                 return Err(OpenMessageError::MalformedOptParam);
@@ -486,7 +485,7 @@ impl OpenMsg {
                 return Err(OpenMessageError::MalformedOptParam);
             }
             let mut buf_param_value =
-                buf_opts.copy_to_bytes(param_len as usize);
+                buf_opts.try_copy_to_bytes(param_len as usize)?;
 
             // Parse and validate capabilities.
             match OpenParamType::from_u8(param_type) {
@@ -581,7 +580,7 @@ impl Capability {
             return Err(OpenMessageError::MalformedOptParam);
         }
 
-        let mut buf_cap = buf.copy_to_bytes(cap_len as usize);
+        let mut buf_cap = buf.try_copy_to_bytes(cap_len as usize)?;
         let cap = match CapabilityCode::from_u8(cap_type) {
             Some(CapabilityCode::MultiProtocol) => {
                 if cap_len != 4 {
@@ -731,7 +730,7 @@ impl UpdateMsg {
                 let prefix_bytes = prefix.ip().octets();
                 let plen_wire = prefix_wire_len(plen);
                 buf.put_u8(plen);
-                buf.put(&prefix_bytes[0..plen_wire]);
+                buf.put_slice(&prefix_bytes[0..plen_wire]);
             }
 
             // Rewrite the "Withdrawn Routes Length" field.
@@ -793,7 +792,7 @@ impl UpdateMsg {
         }
 
         // Withdrawn Routes.
-        let mut buf_wdraw = buf.copy_to_bytes(wdraw_len as usize);
+        let mut buf_wdraw = buf.try_copy_to_bytes(wdraw_len as usize)?;
         let mut prefixes = Vec::new();
         while buf_wdraw.remaining() > 0 {
             if let Some(prefix) = decode_ipv4_prefix(&mut buf_wdraw)? {
@@ -815,7 +814,7 @@ impl UpdateMsg {
 
         // Path Attributes.
         if attr_len != 0 {
-            let mut buf_attr = buf.copy_to_bytes(attr_len as usize);
+            let mut buf_attr = buf.try_copy_to_bytes(attr_len as usize)?;
             let nlri_present = buf.remaining() > 0;
             attrs = Attrs::decode(
                 &mut buf_attr,
@@ -1021,7 +1020,7 @@ pub(crate) fn encode_ipv4_prefix(buf: &mut BytesMut, prefix: &Ipv4Network) {
     // Encode prefix address (variable length).
     let prefix_bytes = prefix.ip().octets();
     let plen_wire = prefix_wire_len(plen);
-    buf.put(&prefix_bytes[0..plen_wire]);
+    buf.put_slice(&prefix_bytes[0..plen_wire]);
 }
 
 pub(crate) fn encode_ipv6_prefix(buf: &mut BytesMut, prefix: &Ipv6Network) {
@@ -1032,7 +1031,7 @@ pub(crate) fn encode_ipv6_prefix(buf: &mut BytesMut, prefix: &Ipv6Network) {
     // Encode prefix address (variable length).
     let prefix_bytes = prefix.ip().octets();
     let plen_wire = prefix_wire_len(plen);
-    buf.put(&prefix_bytes[0..plen_wire]);
+    buf.put_slice(&prefix_bytes[0..plen_wire]);
 }
 
 pub fn decode_ipv4_prefix(

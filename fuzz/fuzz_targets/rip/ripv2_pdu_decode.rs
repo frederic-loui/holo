@@ -8,9 +8,9 @@
 //
 #![no_main]
 
-use bytes::Bytes;
 use holo_rip::packet::PduVersion;
 use holo_rip::ripng::packet::Pdu;
+use holo_utils::bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

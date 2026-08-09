@@ -15,10 +15,10 @@ mod pdu;
 use std::net::Ipv4Addr;
 use std::sync::LazyLock as Lazy;
 
-use bytes::{Bytes, BytesMut};
 use const_addrs::{ip, ip4, ip6, net};
 use holo_ldp::packet::*;
 use holo_protocol::assert_eq_hex;
+use holo_utils::bytes::{Bytes, BytesMut};
 
 const IPV4_CXT: DecodeCxt = DecodeCxt {
     pkt_info: PacketInfo {

@@ -6,7 +6,7 @@
 
 use std::net::Ipv4Addr;
 
-use bytes::TryGetError;
+use holo_utils::bytes::TryGetError;
 use holo_utils::mpls::Label;
 use serde::{Deserialize, Serialize};
 use tracing::warn;

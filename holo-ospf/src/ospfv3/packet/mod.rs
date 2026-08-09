@@ -12,8 +12,7 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::sync::atomic;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF};
 use holo_utils::crypto::CryptoProtocolId;
 use holo_utils::ip::{AddressFamily, Ipv4AddrExt};
 use lls::LlsDataBlock;
@@ -842,7 +841,7 @@ impl PacketVersion<Self> for Ospfv3 {
             if buf.remaining() < lls_block_len {
                 return Err(DecodeError::InvalidLength(buf.len() as u16));
             }
-            buf.advance(lls_block_len);
+            buf.try_advance(lls_block_len)?;
             lls_block_len + LLS_HDR_SIZE as usize
         } else {
             0
@@ -893,7 +892,8 @@ impl PacketVersion<Self> for Ospfv3 {
         // in the Cryptographic Authentication computation."
 
         // Compute message digest.
-        let rcvd_digest = buf.slice(..auth_key.algo.digest_size() as usize);
+        let rcvd_digest =
+            buf.try_copy_to_bytes(auth_key.algo.digest_size() as usize)?;
         let digest = auth::message_digest(
             &data[..pkt_len as usize
                 + AUTH_TRAILER_HDR_SIZE as usize

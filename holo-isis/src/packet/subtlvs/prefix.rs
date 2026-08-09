@@ -10,10 +10,9 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
 use holo_utils::bier::{BierEncapId, BiftId};
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::mpls::Label;
 use holo_utils::sr::{IgpAlgoType, Sid};
 use num_traits::FromPrimitive;
@@ -291,7 +290,7 @@ impl BierInfoStlv {
             }
 
             // Parse Stlv value.
-            let mut buf_stlv = buf.copy_to_bytes(stlv_len as usize);
+            let mut buf_stlv = buf.try_copy_to_bytes(stlv_len as usize)?;
             match stlv_etype {
                 Some(
                     BierSubStlvType::MplsEncap | BierSubStlvType::NonMplsEncap,

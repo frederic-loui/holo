@@ -9,9 +9,8 @@
 //! as defined in RFC 6329.
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 use crate::packet::error::{TlvDecodeError, TlvDecodeResult};
@@ -106,7 +105,7 @@ impl SpbmSiStlv {
 
         // Parse B-MAC Address (6 bytes).
         let mut bmac = [0u8; 6];
-        buf.copy_to_slice(&mut bmac);
+        buf.try_copy_to_slice(&mut bmac)?;
 
         // Parse Reserved (4 bits) + Base VID (12 bits).
         let base_vid_raw = buf.try_get_u16()?;

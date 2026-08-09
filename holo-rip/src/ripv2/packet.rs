@@ -7,10 +7,9 @@
 use std::net::Ipv4Addr;
 use std::sync::atomic;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
-use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF, TryGetError};
 use holo_utils::crypto::CryptoAlgo;
 use ipnetwork::Ipv4Network;
 use md5::{Digest, Md5};
@@ -202,9 +201,9 @@ impl Pdu {
         let mut auth_seqno = None;
 
         // Decode the first RTE in advance for authentication purposes.
-        if let Ok(rte) = Rte::decode(
-            &mut buf.slice(Pdu::HDR_LENGTH..Pdu::HDR_LENGTH + Rte::LENGTH),
-        ) {
+        let mut buf_rte =
+            buf.try_slice(Pdu::HDR_LENGTH..Pdu::HDR_LENGTH + Rte::LENGTH)?;
+        if let Ok(rte) = Rte::decode(&mut buf_rte) {
             // Discard the packet if its authentication type doesn't match the
             // interface's configured authentication type.
             if auth.is_some() != matches!(rte, Rte::Auth(RteAuth::Crypto(..))) {
@@ -229,18 +228,19 @@ impl Pdu {
                 }
 
                 // Get the authentication trailer.
-                let auth_trailer =
-                    match Rte::decode(&mut buf.slice(rte.pkt_len as usize..)) {
-                        Ok(Rte::Auth(RteAuth::Trailer(trailer))) => trailer,
-                        _ => return Err(DecodeError::AuthError),
-                    };
+                let mut buf_trailer =
+                    buf.try_slice(rte.pkt_len as usize..buf.len())?;
+                let auth_trailer = match Rte::decode(&mut buf_trailer) {
+                    Ok(Rte::Auth(RteAuth::Trailer(trailer))) => trailer,
+                    _ => return Err(DecodeError::AuthError),
+                };
 
                 // Compute message digest.
                 let digest = match auth.algo {
                     CryptoAlgo::Md5 => {
-                        let data = buf.slice(
-                            ..rte.pkt_len as usize + RteAuthCrypto::HDR_LENGTH,
-                        );
+                        let data = buf.try_slice(
+                            0..rte.pkt_len as usize + RteAuthCrypto::HDR_LENGTH,
+                        )?;
                         md5_digest(&data, &auth.key)
                     }
                     _ => {
@@ -427,7 +427,7 @@ impl Rte {
             RteIpv4::AFI => Rte::Ipv4(RteIpv4::decode(buf)?),
             RteAuth::AFI => Rte::Auth(RteAuth::decode(buf)?),
             _ => {
-                buf.advance(Rte::LENGTH - 2);
+                buf.try_advance(Rte::LENGTH - 2)?;
                 return Err(DecodeError::InvalidRteAddressFamily(afi));
             }
         };
@@ -599,7 +599,7 @@ impl RteAuth {
                 RteAuth::Trailer(RteAuthTrailer(buf.clone()))
             }
             _ => {
-                buf.advance(Rte::LENGTH - 4);
+                buf.try_advance(Rte::LENGTH - 4)?;
                 return Err(DecodeError::InvalidRteAuthType(auth_type));
             }
         };

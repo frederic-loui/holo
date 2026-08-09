@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use bytes::TryGetError;
+use holo_utils::bytes::TryGetError;
 use serde::{Deserialize, Serialize};
 
 // BGP message decoding errors.

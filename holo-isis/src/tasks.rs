@@ -60,7 +60,7 @@ use crate::{lsdb, network, spf};
 
 // IS-IS inter-task message types.
 pub mod messages {
-    use bytes::Bytes;
+    use holo_utils::bytes::Bytes;
     use holo_utils::mac_addr::MacAddr;
     use serde::{Deserialize, Serialize};
 

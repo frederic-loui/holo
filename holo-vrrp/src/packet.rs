@@ -9,8 +9,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::ip::AddressFamily;
 use holo_utils::mac_addr::MacAddr;
 use holo_utils::socket::TTL_MAX;
@@ -389,8 +388,8 @@ impl Vrrp4Packet {
 
     pub fn encode(&self) -> BytesMut {
         let mut buf = BytesMut::with_capacity(Self::MAX_LEN);
-        buf.put(self.ip.encode());
-        buf.put(self.vrrp.encode());
+        buf.put_slice(&self.ip.encode());
+        buf.put_slice(&self.vrrp.encode());
         buf
     }
 }

@@ -14,8 +14,8 @@ pub mod spb;
 
 use std::collections::BTreeMap;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::sr::MsdType;
 use serde::{Deserialize, Serialize};
 

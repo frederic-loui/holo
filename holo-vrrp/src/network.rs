@@ -16,8 +16,8 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, atomic};
 
-use bytes::{BufMut, Bytes};
 use const_addrs::{ip4, ip6};
+use holo_utils::bytes::Bytes;
 use holo_utils::capabilities;
 use holo_utils::ip::AddressFamily;
 use holo_utils::socket::{
@@ -322,7 +322,7 @@ async fn send_packet_arp(
 
     // Encode packet.
     let mut buf = eth_hdr.encode();
-    buf.put(arp_hdr.encode());
+    buf.put_slice(&arp_hdr.encode());
 
     // Send packet.
     let iov = [IoSlice::new(&buf)];

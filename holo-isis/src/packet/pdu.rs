@@ -13,8 +13,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use holo_utils::bytes::TLS_BUF;
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF};
 use holo_utils::crypto::{CryptoAlgo, HMAC_APAD};
 use holo_utils::keychain::Key;
 use holo_utils::mac_addr::MacAddr;
@@ -657,7 +656,7 @@ impl Hello {
             let span = warn_span!("TLV", r#type = tlv_type, length = tlv_len);
             let _span_guard = span.enter();
             let tlv_offset = buf_orig.len() - buf.remaining();
-            let mut buf_tlv = buf.copy_to_bytes(tlv_len as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_len as usize)?;
             match tlv_etype {
                 Some(TlvType::AreaAddresses) => {
                     match AreaAddressesTlv::decode(tlv_len, &mut buf_tlv) {
@@ -1037,7 +1036,7 @@ impl Lsp {
             let span = warn_span!("TLV", r#type = tlv_type, length = tlv_len);
             let _span_guard = span.enter();
             let tlv_offset = buf_orig.len() - buf.remaining();
-            let mut buf_tlv = buf.copy_to_bytes(tlv_len as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_len as usize)?;
             match tlv_etype {
                 Some(TlvType::AreaAddresses) => {
                     match AreaAddressesTlv::decode(tlv_len, &mut buf_tlv) {
@@ -1914,7 +1913,7 @@ impl Snp {
             let span = warn_span!("TLV", r#type = tlv_type, length = tlv_len);
             let _span_guard = span.enter();
             let tlv_offset = buf_orig.len() - buf.remaining();
-            let mut buf_tlv = buf.copy_to_bytes(tlv_len as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_len as usize)?;
             match tlv_etype {
                 Some(TlvType::Authentication) => {
                     if tlv_auth.is_some() {

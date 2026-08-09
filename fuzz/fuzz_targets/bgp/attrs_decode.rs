@@ -2,10 +2,9 @@
 
 use std::net::Ipv4Addr;
 
-use bytes::Bytes;
 use holo_bgp::packet::attribute::Attrs;
 use holo_bgp::packet::message::DecodeCxt;
-use holo_utils::bytes::BytesExt;
+use holo_utils::bytes::Bytes;
 use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 

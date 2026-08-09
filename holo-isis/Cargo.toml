@@ -8,7 +8,6 @@ edition.workspace = true
 [dependencies]
 arc-swap.workspace = true
 bitflags.workspace = true
-bytes.workspace = true
 chrono.workspace = true
 derive-new.workspace = true
 fletcher.workspace = true

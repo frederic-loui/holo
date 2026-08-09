@@ -10,8 +10,8 @@ use std::ops::Deref;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
-use bytes::{Buf, Bytes};
 use const_addrs::ip4;
+use holo_utils::bytes::{Bytes, TryGetError};
 use holo_utils::capabilities;
 use holo_utils::socket::{AsyncFd, RawSocketExt, Socket};
 use nix::sys::socket::{self, SockaddrIn};
@@ -151,10 +151,9 @@ pub(crate) async fn read_loop(
 
                 // Move past the IPv4 header.
                 let mut buf = Bytes::copy_from_slice(&iov[0].deref()[0..bytes]);
-                let hdr_len = buf.get_u8() & 0x0F;
-                let _tos = buf.get_u8();
-                let _total_len = buf.get_u16();
-                buf.advance(((hdr_len << 2) - 4) as usize);
+                if skip_ip_hdr(&mut buf).is_err() {
+                    continue;
+                }
 
                 // Decode IGMP packet.
                 let packet = Packet::decode(&mut buf);
@@ -177,6 +176,14 @@ pub(crate) async fn read_loop(
 }
 
 // ===== helper functions =====
+
+// Moves past the IPv4 header.
+fn skip_ip_hdr(buf: &mut Bytes) -> Result<(), TryGetError> {
+    let hdr_len = buf.try_get_u8()? & 0x0F;
+    let _tos = buf.try_get_u8()?;
+    let _total_len = buf.try_get_u16()?;
+    buf.try_advance(((hdr_len << 2) - 4) as usize)
+}
 
 #[cfg(not(feature = "testing"))]
 async fn send_packet(

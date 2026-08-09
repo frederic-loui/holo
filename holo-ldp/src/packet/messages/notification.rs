@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use holo_utils::bytes::{Bytes, BytesMut};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
@@ -343,7 +343,7 @@ impl TlvKind for TlvReturnedPdu {
     const F_BIT: bool = false;
 
     fn encode_value(&self, buf: &mut BytesMut) {
-        buf.extend(self.0.clone());
+        buf.put_slice(&self.0);
     }
 
     fn decode_value(
@@ -369,7 +369,7 @@ impl TlvKind for TlvReturnedMsg {
     const F_BIT: bool = false;
 
     fn encode_value(&self, buf: &mut BytesMut) {
-        buf.extend(self.0.clone());
+        buf.put_slice(&self.0);
     }
 
     fn decode_value(
@@ -395,7 +395,7 @@ impl TlvKind for TlvReturnedTlvs {
     const F_BIT: bool = false;
 
     fn encode_value(&self, buf: &mut BytesMut) {
-        buf.extend(self.0.clone());
+        buf.put_slice(&self.0);
     }
 
     fn decode_value(

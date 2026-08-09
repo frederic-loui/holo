@@ -6,8 +6,7 @@
 use std::net::Ipv4Addr;
 use std::ops::Deref;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut, TryGetError};
 use internet_checksum::Checksum;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;

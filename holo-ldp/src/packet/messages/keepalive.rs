@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use bytes::{Bytes, BytesMut};
+use holo_utils::bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 use crate::packet::DecodeCxt;

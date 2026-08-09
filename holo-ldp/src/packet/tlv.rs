@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use holo_utils::bytes::{Bytes, BytesMut};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
@@ -178,7 +178,7 @@ pub(crate) fn decode_tlv_hdr(
     buf: &mut Bytes,
     msgi: &mut MessageDecodeInfo,
 ) -> DecodeResult<TlvDecodeInfo> {
-    let buf_copy = buf.clone();
+    let mut buf_copy = buf.clone();
 
     // Parse TLV type.
     let tlv_type = buf.try_get_u16()?;
@@ -194,7 +194,7 @@ pub(crate) fn decode_tlv_hdr(
     }
 
     // Save slice containing the entire TLV.
-    let tlv_raw = buf_copy.slice(0..tlv_size as usize);
+    let tlv_raw = buf_copy.try_copy_to_bytes(tlv_size as usize)?;
 
     // Update number of remaining bytes in the message.
     msgi.msg_rlen -= tlv_size;

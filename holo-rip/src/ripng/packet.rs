@@ -6,10 +6,9 @@
 
 use std::net::Ipv6Addr;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use const_addrs::net6;
 use derive_new::new;
-use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF, TryGetError};
 use holo_utils::crypto::CryptoAlgo;
 use holo_utils::ip::Ipv6NetworkExt;
 use ipnetwork::Ipv6Network;

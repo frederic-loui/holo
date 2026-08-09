@@ -8,7 +8,6 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock as Lazy};
 
-use bytes::Bytes;
 use const_addrs::{ip4, net4};
 use holo_ospf::ospfv2::packet::iana::*;
 use holo_ospf::ospfv2::packet::lsa::*;
@@ -23,6 +22,7 @@ use holo_ospf::packet::tlv::*;
 use holo_ospf::packet::{DbDescFlags, Packet};
 use holo_ospf::version::Ospfv2;
 use holo_protocol::assert_eq_hex;
+use holo_utils::bytes::Bytes;
 use holo_utils::crypto::CryptoAlgo;
 use holo_utils::ip::AddressFamily;
 use holo_utils::keychain::Key;

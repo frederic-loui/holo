@@ -8,14 +8,14 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use bytes::{Buf, BytesMut};
+use holo_utils::bytes::BytesMut;
 use holo_utils::capabilities;
 use holo_utils::ip::{AddressFamily, IpAddrExt, IpAddrKind};
 use holo_utils::socket::{
     OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, TcpConnInfo,
     TcpListener, TcpSocket, TcpSocketExt, TcpStream, TcpStreamExt,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
@@ -250,7 +250,7 @@ pub(crate) async fn nbr_read_loop(
 
     loop {
         // Read data from the network.
-        match stream.read_buf(&mut data).await {
+        match data.read_from(&mut stream).await {
             Ok(0) => {
                 // Notify that the connection was closed by the remote end.
                 let msg = NbrRxMsg {
@@ -271,7 +271,7 @@ pub(crate) async fn nbr_read_loop(
         while let Some(msg_size) = Message::get_message_len(&data) {
             let msg = Message::decode(&data[0..msg_size], &cxt)
                 .map_err(NbrRxError::MsgDecodeError);
-            data.advance(msg_size);
+            data.try_advance(msg_size).unwrap();
 
             // Keep track of received capabilities as they influence how some
             // messages should be decoded.

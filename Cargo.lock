@@ -1050,7 +1050,6 @@ name = "holo-bfd"
 version = "0.9.0"
 dependencies = [
  "bitflags 2.13.0",
- "bytes",
  "chrono",
  "criterion",
  "derive-new",
@@ -1083,7 +1082,6 @@ dependencies = [
  "arbitrary",
  "arc-swap",
  "bitflags 2.13.0",
- "bytes",
  "chrono",
  "const-addrs",
  "criterion",
@@ -1167,7 +1165,6 @@ name = "holo-igmp"
 version = "0.9.0"
 dependencies = [
  "bitflags 2.13.0",
- "bytes",
  "chrono",
  "const-addrs",
  "derive-new",
@@ -1229,7 +1226,6 @@ version = "0.9.0"
 dependencies = [
  "arc-swap",
  "bitflags 2.13.0",
- "bytes",
  "chrono",
  "const-addrs",
  "criterion",
@@ -1286,7 +1282,6 @@ name = "holo-ldp"
 version = "0.9.0"
 dependencies = [
  "bitflags 2.13.0",
- "bytes",
  "chrono",
  "const-addrs",
  "criterion",
@@ -1338,7 +1333,6 @@ version = "0.9.0"
 dependencies = [
  "arc-swap",
  "bitflags 2.13.0",
- "bytes",
  "chrono",
  "const-addrs",
  "criterion",
@@ -1432,7 +1426,6 @@ name = "holo-rip"
 version = "0.9.0"
 dependencies = [
  "bitflags 2.13.0",
- "bytes",
  "chrono",
  "const-addrs",
  "derive-new",
@@ -1565,7 +1558,6 @@ dependencies = [
 name = "holo-vrrp"
 version = "0.9.0"
 dependencies = [
- "bytes",
  "chrono",
  "const-addrs",
  "enum-as-inner 0.7.0",

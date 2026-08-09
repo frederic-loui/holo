@@ -1,10 +1,10 @@
 use std::hint::black_box;
 use std::sync::LazyLock as Lazy;
 
-use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
 use holo_ospf::packet::*;
 use holo_ospf::version::Ospfv2;
+use holo_utils::bytes::Bytes;
 use holo_utils::ip::AddressFamily;
 
 static BYTES: Lazy<Vec<u8>> = Lazy::new(|| {

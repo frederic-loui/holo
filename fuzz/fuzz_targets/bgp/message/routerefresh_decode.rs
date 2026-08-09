@@ -1,9 +1,8 @@
 #![no_main]
 
-use bytes::Bytes;
 use holo_bgp::packet::message::RouteRefreshMsg;
-use holo_utils::bytes::BytesExt;
-use libfuzzer_sys::arbitrary::Unstructured;
+use holo_utils::bytes::Bytes;
+use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

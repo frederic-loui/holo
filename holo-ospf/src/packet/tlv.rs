@@ -7,10 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
 use holo_utils::bier::{BierEncapId, BiftId, Bsl};
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::mpls::Label;
 use holo_utils::sr::{IgpAlgoType, Sid};
 use num_derive::{FromPrimitive, ToPrimitive};
@@ -378,7 +377,7 @@ impl BierStlv {
             }
 
             // Parse Sub-TLV value.
-            let mut buf_stlv = buf.copy_to_bytes(stlv_wlen as usize);
+            let mut buf_stlv = buf.try_copy_to_bytes(stlv_wlen as usize)?;
             match BierStlvType::from_u16(stlv_type) {
                 Some(stlv_type) => {
                     match stlv_type {
@@ -641,7 +640,7 @@ impl SidLabelRangeTlv {
             }
 
             // Parse Sub-TLV value.
-            let mut buf_stlv = buf.copy_to_bytes(stlv_wlen as usize);
+            let mut buf_stlv = buf.try_copy_to_bytes(stlv_wlen as usize)?;
             match stlv_type {
                 SUBTLV_SID_LABEL => {
                     let sid = match stlv_len {
@@ -730,7 +729,7 @@ impl SrLocalBlockTlv {
             }
 
             // Parse Sub-TLV value.
-            let mut buf_stlv = buf.copy_to_bytes(stlv_wlen as usize);
+            let mut buf_stlv = buf.try_copy_to_bytes(stlv_wlen as usize)?;
             match stlv_type {
                 SUBTLV_SID_LABEL => {
                     let sid = match stlv_len {

@@ -8,8 +8,8 @@
 //
 #![no_main]
 
-use bytes::Bytes;
 use holo_isis::packet::pdu::Pdu;
+use holo_utils::bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

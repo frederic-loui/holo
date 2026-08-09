@@ -8,10 +8,9 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::ip::AddressFamily;
 use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};

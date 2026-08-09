@@ -10,8 +10,8 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use bytes::Bytes;
 use chrono::Utc;
+use holo_utils::bytes::Bytes;
 use holo_utils::mac_addr::MacAddr;
 
 use crate::adjacency::{Adjacency, AdjacencyEvent, AdjacencyState};

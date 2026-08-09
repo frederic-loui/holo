@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use arc_swap::ArcSwap;
-use bytes::Bytes;
+use holo_utils::bytes::Bytes;
 use holo_utils::ip::{AddressFamily, IpAddrKind, IpNetworkKind};
 use holo_utils::socket::{AsyncFd, Socket};
 use nix::sys::socket::{self, SockaddrLike};

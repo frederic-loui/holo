@@ -7,8 +7,7 @@
 use std::net::Ipv4Addr;
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 

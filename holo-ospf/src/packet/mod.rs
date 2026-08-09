@@ -16,8 +16,8 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 use bitflags::bitflags;
-use bytes::{Bytes, BytesMut};
 use error::DecodeError;
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::ip::AddressFamily;
 use holo_yang::ToYang;
 use lls::{LlsData, LlsDbDescData, LlsHelloData};
@@ -350,8 +350,9 @@ impl<V: Version> Packet<V> {
         };
 
         // Decode the packet body.
-        let mut buf =
-            buf.slice(..pkt_len as usize - V::PacketHdr::LENGTH as usize);
+        let mut buf = buf.try_copy_to_bytes(
+            pkt_len as usize - V::PacketHdr::LENGTH as usize,
+        )?;
         let packet = match hdr.pkt_type() {
             PacketType::Hello => {
                 Packet::Hello(V::PacketHello::decode(af, hdr, &mut buf, lls)?)

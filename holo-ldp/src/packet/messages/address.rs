@@ -7,8 +7,7 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::ip::AddressFamily;
 use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};

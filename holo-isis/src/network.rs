@@ -13,7 +13,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use bytes::Bytes;
+use holo_utils::bytes::Bytes;
 use holo_utils::capabilities;
 use holo_utils::keychain::Key;
 use holo_utils::mac_addr::MacAddr;

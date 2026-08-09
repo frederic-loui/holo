@@ -8,9 +8,8 @@ use std::collections::{BTreeSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::ip::{Ipv4AddrExt, Ipv6AddrExt};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
@@ -339,7 +338,7 @@ impl Attrs {
                 withdraw = true;
                 break;
             }
-            let mut buf = buf.copy_to_bytes(attr_len);
+            let mut buf = buf.try_copy_to_bytes(attr_len)?;
 
             // RFC 7606 - Section 3.c:
             // "If the value of either the Optional or Transitive bits in the

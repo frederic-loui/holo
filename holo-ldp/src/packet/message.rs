@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use holo_utils::bytes::{Bytes, BytesMut};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
@@ -164,7 +164,7 @@ pub trait MessageKind: std::fmt::Debug {
             if unknown {
                 // Ignore TLV is the u-bit is set, otherwise return an error.
                 if tlvi.tlv_type & tlv::TLV_UNKNOWN_FLAG != 0 {
-                    buf.advance(tlvi.tlv_len as usize);
+                    buf.try_advance(tlvi.tlv_len as usize)?;
                 } else {
                     return Err(DecodeError::UnknownTlv(
                         msgi.clone(),
@@ -274,7 +274,7 @@ impl Message {
         cxt: &DecodeCxt,
         pdui: &mut PduDecodeInfo,
     ) -> DecodeResult<MessageDecodeInfo> {
-        let buf_copy = buf.clone();
+        let mut buf_copy = buf.clone();
 
         // Parse message type.
         let msg_type = buf.try_get_u16()?;
@@ -293,7 +293,7 @@ impl Message {
         let msg_id = buf.try_get_u32()?;
 
         // Save slice containing the entire message.
-        let msg_raw = buf_copy.slice(0..msg_size as usize);
+        let msg_raw = buf_copy.try_copy_to_bytes(msg_size as usize)?;
 
         // Calculate remaining bytes in the message header.
         let msg_rlen = msg_len - Message::HDR_MIN_LEN;
@@ -365,7 +365,7 @@ impl Message {
             return Err(DecodeError::UnknownMessage(msgi, msg_type));
         }
 
-        buf.advance(msgi.msg_rlen as usize);
+        buf.try_advance(msgi.msg_rlen as usize)?;
         Ok(())
     }
 }

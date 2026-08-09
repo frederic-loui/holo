@@ -4,10 +4,25 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::cell::RefCell;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+//! Panic-free byte buffers.
+//!
+//! [`Bytes`] and [`BytesMut`] are thin wrappers around the types of the same
+//! name from the `bytes` crate. They expose only the subset of the original
+//! API that can't panic. Every operation whose outcome depends on the amount
+//! of data left in the buffer is named `try_*` and returns a [`Result`],
+//! failing with [`TryGetError`] when the buffer is too short instead of
+//! panicking.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
+use std::cell::RefCell;
+use std::fmt::{self, Debug};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::ops::{Deref, DerefMut, Range};
+
+pub use bytes::TryGetError;
+use bytes::{Buf, BufMut};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::mac_addr::MacAddr;
 
@@ -16,384 +31,589 @@ thread_local!(
         RefCell::new(BytesMut::with_capacity(65536))
 );
 
-// Extension methods for Bytes.
-pub trait BytesExt {
-    /// Generate an arbitrary value of `Bytes` from the given unstructured data.
-    fn arbitrary(
-        u: &mut arbitrary::Unstructured<'_>,
-    ) -> arbitrary::Result<Bytes>;
+/// A cheaply cloneable and sliceable chunk of contiguous memory.
+#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct Bytes(bytes::Bytes);
 
-    /// Gets an unsigned 24 bit integer from `self` in the big-endian byte
-    /// order.
-    ///
-    /// The current position is advanced by 3.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is no more remaining data in `self`.
-    fn get_u24(&mut self) -> u32;
-
-    /// Gets an unsigned 24 bit integer from `self` in the big-endian byte
-    /// order.
-    ///
-    /// The current position is advanced by 3.
-    ///
-    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
-    /// read the value.
-    fn try_get_u24(&mut self) -> Result<u32, TryGetError>;
-
-    /// Gets an IPv4 address from `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 4.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is no more remaining data in `self`.
-    fn get_ipv4(&mut self) -> Ipv4Addr;
-
-    /// Gets an IPv4 address from `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 4.
-    ///
-    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
-    /// read the value.
-    fn try_get_ipv4(&mut self) -> Result<Ipv4Addr, TryGetError>;
-
-    /// Gets an optional IPv4 address from `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 4.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is no more remaining data in `self`.
-    fn get_opt_ipv4(&mut self) -> Option<Ipv4Addr>;
-
-    /// Gets an optional IPv4 address from `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 4.
-    ///
-    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
-    /// read the value.
-    fn try_get_opt_ipv4(&mut self) -> Result<Option<Ipv4Addr>, TryGetError>;
-
-    /// Gets an IPv6 address from `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 16.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is no more remaining data in `self`.
-    fn get_ipv6(&mut self) -> Ipv6Addr;
-
-    /// Gets an IPv6 address from `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 16.
-    ///
-    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
-    /// read the value.
-    fn try_get_ipv6(&mut self) -> Result<Ipv6Addr, TryGetError>;
-
-    /// Gets an optional IPv6 address from `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 16.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is no more remaining data in `self`.
-    fn get_opt_ipv6(&mut self) -> Option<Ipv6Addr>;
-
-    /// Gets an optional IPv6 address from `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 16.
-    ///
-    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
-    /// read the value.
-    fn try_get_opt_ipv6(&mut self) -> Result<Option<Ipv6Addr>, TryGetError>;
-
-    /// Gets a MAC address from `self`.
-    ///
-    /// The current position is advanced by 6.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is no more remaining data in `self`.
-    fn get_mac(&mut self) -> MacAddr;
-
-    /// Gets a MAC address from `self`.
-    ///
-    /// The current position is advanced by 6.
-    ///
-    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
-    /// read the value.
-    fn try_get_mac(&mut self) -> Result<MacAddr, TryGetError>;
-}
-
-// Extension methods for BytesMut.
-pub trait BytesMutExt {
-    /// Writes an unsigned 24 bit integer to `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 3.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is not enough remaining capacity in
-    /// `self`.
-    fn put_u24(&mut self, n: u32);
-
-    /// Writes an IP address to `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 4 or 16.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is not enough remaining capacity in
-    /// `self`.
-    fn put_ip(&mut self, addr: &IpAddr);
-
-    /// Writes an IPv4 address to `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 4.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is not enough remaining capacity in
-    /// `self`.
-    fn put_ipv4(&mut self, addr: &Ipv4Addr);
-
-    /// Writes an IPv6 address to `self` in big-endian byte order.
-    ///
-    /// The current position is advanced by 16.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is not enough remaining capacity in
-    /// `self`.
-    fn put_ipv6(&mut self, addr: &Ipv6Addr);
-
-    /// Writes a MAC address to `self`.
-    ///
-    /// The current position is advanced by 6.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is not enough remaining capacity in
-    /// `self`.
-    fn put_mac(&mut self, addr: &MacAddr);
-}
+/// A unique reference to a contiguous slice of memory.
+#[derive(Clone, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct BytesMut(bytes::BytesMut);
 
 // ===== impl Bytes =====
 
-impl BytesExt for Bytes {
-    fn arbitrary(
-        u: &mut arbitrary::Unstructured<'_>,
-    ) -> arbitrary::Result<Bytes> {
-        let len = u.len();
-        let bytes = u.bytes(len)?;
-        Ok(Bytes::copy_from_slice(bytes))
+impl Bytes {
+    /// Creates a new empty `Bytes`.
+    ///
+    /// This will not allocate and the returned `Bytes` handle will be empty.
+    pub const fn new() -> Self {
+        Bytes(bytes::Bytes::new())
     }
 
-    fn get_u24(&mut self) -> u32 {
-        self.try_get_u24().unwrap()
+    /// Creates `Bytes` instance from slice, by copying it.
+    pub fn copy_from_slice(data: &[u8]) -> Self {
+        Bytes(bytes::Bytes::copy_from_slice(data))
     }
 
-    fn try_get_u24(&mut self) -> Result<u32, TryGetError> {
+    /// Returns the number of bytes contained in this `Bytes`.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns true if the `Bytes` has a length of 0.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns the number of bytes between the current position and the end
+    /// of the buffer.
+    pub fn remaining(&self) -> usize {
+        self.0.remaining()
+    }
+
+    /// Returns a slice of self for the provided range.
+    ///
+    /// This will increment the reference count for the underlying memory and
+    /// return a new `Bytes` handle set to the slice. This operation is `O(1)`.
+    ///
+    /// Returns `Err(TryGetError)` when the range extends past the end of the
+    /// buffer.
+    pub fn try_slice(&self, range: Range<usize>) -> Result<Bytes, TryGetError> {
+        let available = self.0.len();
+        if range.start > range.end || range.end > available {
+            return Err(TryGetError {
+                requested: range.end,
+                available,
+            });
+        }
+        Ok(Bytes(self.0.slice(range)))
+    }
+
+    /// Shortens the buffer, keeping the first `len` bytes and dropping the
+    /// rest.
+    ///
+    /// If `len` is greater than the buffer's current length, this has no
+    /// effect.
+    pub fn truncate(&mut self, len: usize) {
+        self.0.truncate(len);
+    }
+
+    /// Clears the buffer, removing all data.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Advances the internal cursor of the buffer.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes.
+    pub fn try_advance(&mut self, cnt: usize) -> Result<(), TryGetError> {
+        self.check_remaining(cnt)?;
+        self.0.advance(cnt);
+        Ok(())
+    }
+
+    /// Consumes `len` bytes inside self and returns new instance of `Bytes`
+    /// with this data.
+    ///
+    /// This is a shallow copy (ref-count increment), no data is moved.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes.
+    pub fn try_copy_to_bytes(
+        &mut self,
+        len: usize,
+    ) -> Result<Bytes, TryGetError> {
+        self.check_remaining(len)?;
+        Ok(Bytes(self.0.copy_to_bytes(len)))
+    }
+
+    /// Copies bytes from `self` into `dst`.
+    ///
+    /// The cursor is advanced by the number of bytes copied.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_copy_to_slice(
+        &mut self,
+        dst: &mut [u8],
+    ) -> Result<(), TryGetError> {
+        self.0.try_copy_to_slice(dst)
+    }
+
+    /// Gets an unsigned 8 bit integer from `self`.
+    ///
+    /// The current position is advanced by 1.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_u8(&mut self) -> Result<u8, TryGetError> {
+        self.0.try_get_u8()
+    }
+
+    /// Gets an unsigned 16 bit integer from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 2.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_u16(&mut self) -> Result<u16, TryGetError> {
+        self.0.try_get_u16()
+    }
+
+    /// Gets an unsigned 24 bit integer from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 3.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_u24(&mut self) -> Result<u32, TryGetError> {
         let mut n = [0; 4];
         self.try_copy_to_slice(&mut n[1..=3])?;
         Ok(u32::from_be_bytes(n))
     }
 
-    fn get_ipv4(&mut self) -> Ipv4Addr {
-        self.try_get_ipv4().unwrap()
+    /// Gets an unsigned 32 bit integer from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_u32(&mut self) -> Result<u32, TryGetError> {
+        self.0.try_get_u32()
     }
 
-    fn try_get_ipv4(&mut self) -> Result<Ipv4Addr, TryGetError> {
+    /// Gets a signed 32 bit integer from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_i32(&mut self) -> Result<i32, TryGetError> {
+        self.0.try_get_i32()
+    }
+
+    /// Gets an unsigned 64 bit integer from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 8.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_u64(&mut self) -> Result<u64, TryGetError> {
+        self.0.try_get_u64()
+    }
+
+    /// Gets an unsigned 128 bit integer from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 16.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_u128(&mut self) -> Result<u128, TryGetError> {
+        self.0.try_get_u128()
+    }
+
+    /// Gets an IEEE754 single-precision (4 bytes) floating point number from
+    /// `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_f32(&mut self) -> Result<f32, TryGetError> {
+        self.0.try_get_f32()
+    }
+
+    /// Gets an IPv4 address from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_ipv4(&mut self) -> Result<Ipv4Addr, TryGetError> {
         let bytes = self.try_get_u32()?;
         Ok(Ipv4Addr::from(bytes))
     }
 
-    fn get_opt_ipv4(&mut self) -> Option<Ipv4Addr> {
-        self.try_get_opt_ipv4().unwrap()
-    }
-
-    fn try_get_opt_ipv4(&mut self) -> Result<Option<Ipv4Addr>, TryGetError> {
-        let bytes = self.try_get_u32()?;
-        let addr = Ipv4Addr::from(bytes);
+    /// Gets an optional IPv4 address from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_opt_ipv4(
+        &mut self,
+    ) -> Result<Option<Ipv4Addr>, TryGetError> {
+        let addr = self.try_get_ipv4()?;
         Ok((!addr.is_unspecified()).then_some(addr))
     }
 
-    fn get_ipv6(&mut self) -> Ipv6Addr {
-        self.try_get_ipv6().unwrap()
-    }
-
-    fn try_get_ipv6(&mut self) -> Result<Ipv6Addr, TryGetError> {
+    /// Gets an IPv6 address from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 16.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_ipv6(&mut self) -> Result<Ipv6Addr, TryGetError> {
         let bytes = self.try_get_u128()?;
         Ok(Ipv6Addr::from(bytes))
     }
 
-    fn get_opt_ipv6(&mut self) -> Option<Ipv6Addr> {
-        self.try_get_opt_ipv6().unwrap()
-    }
-
-    fn try_get_opt_ipv6(&mut self) -> Result<Option<Ipv6Addr>, TryGetError> {
-        let bytes = self.try_get_u128()?;
-        let addr = Ipv6Addr::from(bytes);
+    /// Gets an optional IPv6 address from `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 16.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_opt_ipv6(
+        &mut self,
+    ) -> Result<Option<Ipv6Addr>, TryGetError> {
+        let addr = self.try_get_ipv6()?;
         Ok((!addr.is_unspecified()).then_some(addr))
     }
 
-    fn get_mac(&mut self) -> MacAddr {
-        self.try_get_mac().unwrap()
-    }
-
-    fn try_get_mac(&mut self) -> Result<MacAddr, TryGetError> {
+    /// Gets a MAC address from `self`.
+    ///
+    /// The current position is advanced by 6.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes to
+    /// read the value.
+    pub fn try_get_mac(&mut self) -> Result<MacAddr, TryGetError> {
         let mut bytes: [u8; MacAddr::LENGTH] = [0; MacAddr::LENGTH];
         self.try_copy_to_slice(&mut bytes)?;
         Ok(MacAddr::from(bytes))
+    }
+
+    /// Returns `Err(TryGetError)` when fewer than `cnt` bytes are left.
+    fn check_remaining(&self, cnt: usize) -> Result<(), TryGetError> {
+        let available = self.0.len();
+        if cnt > available {
+            return Err(TryGetError {
+                requested: cnt,
+                available,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Debug for Bytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Debug::fmt(&self.0, f)
+    }
+}
+
+impl Deref for Bytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(vec: Vec<u8>) -> Self {
+        Bytes(bytes::Bytes::from(vec))
+    }
+}
+
+impl PartialEq<&[u8]> for Bytes {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<Bytes> for &[u8] {
+    fn eq(&self, other: &Bytes) -> bool {
+        other.0 == *self
+    }
+}
+
+impl<'a> arbitrary::Arbitrary<'a> for Bytes {
+    fn arbitrary(
+        u: &mut arbitrary::Unstructured<'a>,
+    ) -> arbitrary::Result<Self> {
+        let len = u.len();
+        let bytes = u.bytes(len)?;
+        Ok(Bytes::copy_from_slice(bytes))
     }
 }
 
 // ===== impl BytesMut =====
 
-impl BytesMutExt for BytesMut {
-    fn put_u24(&mut self, n: u32) {
+impl BytesMut {
+    /// Creates a new empty `BytesMut`.
+    pub fn new() -> Self {
+        BytesMut(bytes::BytesMut::new())
+    }
+
+    /// Creates a new `BytesMut` with the specified capacity.
+    ///
+    /// The returned `BytesMut` will be able to hold at least `capacity` bytes
+    /// without reallocating.
+    ///
+    /// It is important to note that this function does not specify the length
+    /// of the returned `BytesMut`, but only the capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        BytesMut(bytes::BytesMut::with_capacity(capacity))
+    }
+
+    /// Creates a new `BytesMut` containing `len` zeros.
+    ///
+    /// The resulting object has a length of `len` and a capacity greater than
+    /// or equal to `len`. The entire length of the object will be filled with
+    /// zeros.
+    ///
+    /// On some platforms or allocators this function may be faster than a
+    /// manual implementation.
+    pub fn zeroed(len: usize) -> Self {
+        BytesMut(bytes::BytesMut::zeroed(len))
+    }
+
+    /// Returns the number of bytes contained in this `BytesMut`.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns true if the `BytesMut` has a length of 0.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Converts `self` into an immutable `Bytes`.
+    ///
+    /// The conversion is zero cost and is used to indicate that the slice
+    /// referenced by the handle will no longer be mutated. Once the conversion
+    /// is done, the handle can be cloned and shared across threads.
+    pub fn freeze(self) -> Bytes {
+        Bytes(self.0.freeze())
+    }
+
+    /// Splits the bytes into two at the given index.
+    ///
+    /// Afterwards `self` contains elements `[0, at)`, and the returned
+    /// `BytesMut` contains elements `[at, capacity)`. It's guaranteed that the
+    /// memory does not move, that is, the address of `self` does not change,
+    /// and the address of the returned slice is `at` bytes after that.
+    ///
+    /// This is an `O(1)` operation that just increases the reference count and
+    /// sets a few indices.
+    ///
+    /// Returns `Err(TryGetError)` when `at` is beyond the end of the buffer.
+    pub fn try_split_off(
+        &mut self,
+        at: usize,
+    ) -> Result<BytesMut, TryGetError> {
+        self.check_remaining(at)?;
+        Ok(BytesMut(self.0.split_off(at)))
+    }
+
+    /// Shortens the buffer, keeping the first `len` bytes and dropping the
+    /// rest.
+    ///
+    /// If `len` is greater than the buffer's current length, this has no
+    /// effect. Existing underlying capacity is preserved.
+    pub fn truncate(&mut self, len: usize) {
+        self.0.truncate(len);
+    }
+
+    /// Clears the buffer, removing all data. Existing capacity is preserved.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Resizes the buffer so that `len` is equal to `new_len`.
+    ///
+    /// If `new_len` is greater than `len`, the buffer is extended by the
+    /// difference with each additional byte set to `value`. If `new_len` is
+    /// less than `len`, the buffer is simply truncated.
+    pub fn resize(&mut self, new_len: usize, value: u8) {
+        self.0.resize(new_len, value);
+    }
+
+    /// Advances the internal cursor of the buffer.
+    ///
+    /// Returns `Err(TryGetError)` when there are not enough remaining bytes.
+    pub fn try_advance(&mut self, cnt: usize) -> Result<(), TryGetError> {
+        self.check_remaining(cnt)?;
+        self.0.advance(cnt);
+        Ok(())
+    }
+
+    /// Reads data from `src` and appends it to the buffer, growing it as
+    /// needed.
+    ///
+    /// Returns the number of bytes read, zero meaning end of file.
+    pub async fn read_from<R>(&mut self, src: &mut R) -> io::Result<usize>
+    where
+        R: AsyncRead + Unpin,
+    {
+        src.read_buf(&mut self.0).await
+    }
+
+    /// Transfer bytes into `self` from `src` and advance the cursor by the
+    /// number of bytes written.
+    pub fn put_slice(&mut self, src: &[u8]) {
+        self.0.put_slice(src);
+    }
+
+    /// Put `cnt` bytes `val` into `self`.
+    ///
+    /// Logically equivalent to calling `self.put_u8(val)` `cnt` times, but may
+    /// work faster.
+    pub fn put_bytes(&mut self, val: u8, cnt: usize) {
+        self.0.put_bytes(val, cnt);
+    }
+
+    /// Writes an unsigned 8 bit integer to `self`.
+    ///
+    /// The current position is advanced by 1.
+    pub fn put_u8(&mut self, n: u8) {
+        self.0.put_u8(n);
+    }
+
+    /// Writes an unsigned 16 bit integer to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 2.
+    pub fn put_u16(&mut self, n: u16) {
+        self.0.put_u16(n);
+    }
+
+    /// Writes an unsigned 24 bit integer to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 3.
+    pub fn put_u24(&mut self, n: u32) {
         let n = n.to_be_bytes();
         self.put_slice(&n[1..=3]);
     }
 
-    fn put_ip(&mut self, addr: &IpAddr) {
+    /// Writes an unsigned 32 bit integer to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    pub fn put_u32(&mut self, n: u32) {
+        self.0.put_u32(n);
+    }
+
+    /// Writes a signed 32 bit integer to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    pub fn put_i32(&mut self, n: i32) {
+        self.0.put_i32(n);
+    }
+
+    /// Writes an unsigned 64 bit integer to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 8.
+    pub fn put_u64(&mut self, n: u64) {
+        self.0.put_u64(n);
+    }
+
+    /// Writes an unsigned 128 bit integer to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 16.
+    pub fn put_u128(&mut self, n: u128) {
+        self.0.put_u128(n);
+    }
+
+    /// Writes an IEEE754 single-precision (4 bytes) floating point number to
+    /// `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    pub fn put_f32(&mut self, n: f32) {
+        self.0.put_f32(n);
+    }
+
+    /// Writes an IP address to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4 or 16.
+    pub fn put_ip(&mut self, addr: &IpAddr) {
         match addr {
             IpAddr::V4(addr) => self.put_slice(&addr.octets()),
             IpAddr::V6(addr) => self.put_slice(&addr.octets()),
         }
     }
 
-    fn put_ipv4(&mut self, addr: &Ipv4Addr) {
-        self.put_u32((*addr).into())
+    /// Writes an IPv4 address to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 4.
+    pub fn put_ipv4(&mut self, addr: &Ipv4Addr) {
+        self.put_slice(&addr.octets());
     }
 
-    fn put_ipv6(&mut self, addr: &Ipv6Addr) {
-        self.put_slice(&addr.octets())
+    /// Writes an IPv6 address to `self` in big-endian byte order.
+    ///
+    /// The current position is advanced by 16.
+    pub fn put_ipv6(&mut self, addr: &Ipv6Addr) {
+        self.put_slice(&addr.octets());
     }
 
-    fn put_mac(&mut self, addr: &MacAddr) {
-        self.put_slice(&addr.as_bytes())
+    /// Writes a MAC address to `self`.
+    ///
+    /// The current position is advanced by 6.
+    pub fn put_mac(&mut self, addr: &MacAddr) {
+        self.put_slice(&addr.as_bytes());
+    }
+
+    /// Returns `Err(TryGetError)` when fewer than `cnt` bytes are left.
+    fn check_remaining(&self, cnt: usize) -> Result<(), TryGetError> {
+        let available = self.0.len();
+        if cnt > available {
+            return Err(TryGetError {
+                requested: cnt,
+                available,
+            });
+        }
+        Ok(())
     }
 }
-#[cfg(test)]
-mod tests {
-    use bytes::Bytes;
 
-    use super::*;
-    use crate::mpls::Label;
-
-    #[test]
-    fn test_try_get_u24() {
-        // Test successful parsing
-        let mut bytes = Bytes::from(vec![0x01, 0x02, 0x03]);
-        assert_eq!(bytes.try_get_u24().unwrap(), 0x010203);
-
-        // Test insufficient bytes
-        let mut bytes = Bytes::from(vec![0x01, 0x02]);
-        assert!(bytes.try_get_u24().is_err());
+impl Debug for BytesMut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Debug::fmt(&self.0, f)
     }
+}
 
-    #[test]
-    fn test_try_get_u24_valid_values() {
-        // Test valid 24-bit values
-        let test_cases = vec![
-            (vec![0x00, 0x00, 0x00], 0x000000), // Minimum value
-            (vec![0x00, 0x00, 0x01], 0x000001), // Minimum non-zero
-            (vec![0x00, 0x01, 0x00], 0x000100), // Single byte in middle position
-            (vec![0x01, 0x00, 0x00], 0x010000), // Single byte in high position
-            (vec![0xFF, 0xFF, 0xFF], 0xFFFFFF), // Maximum 24-bit value
-            (vec![0x12, 0x34, 0x56], 0x123456), // Random value
-            (vec![0x0F, 0xFF, 0xFF], 0x0FFFFF), // Maximum valid MPLS label
-        ];
+impl Deref for BytesMut {
+    type Target = [u8];
 
-        for (input_bytes, expected) in test_cases {
-            let mut buf = Bytes::from(input_bytes.clone());
-            let result = buf.try_get_u24().unwrap();
-            assert_eq!(
-                result, expected,
-                "Failed for input: {:02X?}",
-                input_bytes
-            );
-            assert_eq!(buf.remaining(), 0, "Buffer should be fully consumed");
-        }
+    fn deref(&self) -> &[u8] {
+        &self.0
     }
+}
 
-    #[test]
-    fn test_try_get_u24_insufficient_data() {
-        // Test cases with insufficient data
-        let test_cases = vec![
-            vec![],           // Empty buffer
-            vec![0x12],       // 1 byte
-            vec![0x12, 0x34], // 2 bytes
-        ];
-
-        for input_bytes in test_cases {
-            let mut buf = Bytes::from(input_bytes.clone());
-            let result = buf.try_get_u24();
-            assert!(
-                result.is_err(),
-                "Should fail for input: {:02X?}",
-                input_bytes
-            );
-            assert!(
-                matches!(result, Err(_try_get_error)),
-                "Should return TryGetError"
-            );
-        }
+impl DerefMut for BytesMut {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
     }
+}
 
-    #[test]
-    fn test_try_get_u24_with_extra_data() {
-        // Test that try_get_u24 only consumes 3 bytes and leaves the rest
-        let input = vec![0x12, 0x34, 0x56, 0x78, 0x9A];
-        let mut buf = Bytes::from(input);
-
-        let result = buf.try_get_u24().unwrap();
-        assert_eq!(result, 0x123456);
-        assert_eq!(buf.remaining(), 2, "Should have 2 bytes remaining");
-
-        // Verify remaining bytes are correct
-        assert_eq!(buf.get_u8(), 0x78);
-        assert_eq!(buf.get_u8(), 0x9A);
+impl AsRef<[u8]> for BytesMut {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
+}
 
-    #[test]
-    fn test_try_get_u24_multiple_calls() {
-        // Test multiple consecutive calls to try_get_u24
-        let input = vec![0x12, 0x34, 0x56, 0xAB, 0xCD, 0xEF];
-        let mut buf = Bytes::from(input);
-
-        let first = buf.try_get_u24().unwrap();
-        assert_eq!(first, 0x123456);
-
-        let second = buf.try_get_u24().unwrap();
-        assert_eq!(second, 0xABCDEF);
-
-        assert_eq!(buf.remaining(), 0);
+impl From<&[u8]> for BytesMut {
+    fn from(slice: &[u8]) -> Self {
+        BytesMut(bytes::BytesMut::from(slice))
     }
+}
 
-    #[test]
-    fn test_put_u24_large_values() {
-        // Test that put_u24 properly truncates large values to 24 bits
-        let test_cases = vec![
-            (0x01000000, vec![0x00, 0x00, 0x00]), // Truncated to 0
-            (0x01123456, vec![0x12, 0x34, 0x56]), // High byte dropped
-            (0xFF123456, vec![0x12, 0x34, 0x56]), // High byte dropped
-        ];
+impl PartialEq<&[u8]> for BytesMut {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.0 == *other
+    }
+}
 
-        for (input_value, expected_bytes) in test_cases {
-            let mut buf = BytesMut::new();
-            buf.put_u24(input_value);
-
-            let result_bytes: Vec<u8> = buf.to_vec();
-            assert_eq!(
-                result_bytes, expected_bytes,
-                "put_u24 failed for input: 0x{:08X}",
-                input_value
-            );
-        }
+impl PartialEq<BytesMut> for &[u8] {
+    fn eq(&self, other: &BytesMut) -> bool {
+        other.0 == *self
     }
 }

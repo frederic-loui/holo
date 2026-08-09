@@ -8,10 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::ip::{AddressFamily, IpAddrExt, Ipv4AddrExt, Ipv6AddrExt};
 use holo_utils::mpls::Label;
 use holo_utils::sr::{IgpAlgoType, Sid};
@@ -1298,7 +1297,7 @@ impl LsaRouter {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtLsaTlv::RouterLink) => {
                     let link = LsaRouterLink::decode(&mut buf_tlv, true)?;
@@ -1482,7 +1481,7 @@ impl LsaNetwork {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtLsaTlv::AttachedRouters) => {
                     // Instances of the Attached-Router TLV subsequent to the
@@ -1613,7 +1612,7 @@ impl LsaInterAreaPrefix {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtLsaTlv::InterAreaPrefix) => {
                     // Instances of the Inter-Area-Prefix TLV subsequent to the
@@ -1734,7 +1733,7 @@ impl LsaInterAreaRouter {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtLsaTlv::InterAreaRouter) => {
                     // Instances of the Inter-Area-Router TLV subsequent to the
@@ -1881,7 +1880,7 @@ impl LsaAsExternal {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtLsaTlv::ExternalPrefix) => {
                     // Instances of the External-Prefix TLV subsequent to the
@@ -2067,7 +2066,7 @@ impl LsaLink {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtLsaTlv::IntraAreaPrefix) => {
                     let _ = buf_tlv.try_get_u16()?;
@@ -2258,7 +2257,7 @@ impl LsaIntraAreaPrefix {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtLsaTlv::IntraAreaPrefix) => {
                     let _ = buf_tlv.try_get_u16()?;
@@ -2399,7 +2398,7 @@ impl LsaGrace {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(GraceTlvType::GracePeriod) => {
                     let period = GracePeriodTlv::decode(tlv_len, &mut buf_tlv)?;
@@ -2456,7 +2455,7 @@ impl LsaRouterInfo {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(RouterInfoTlvType::InformationalCaps) => {
                     let caps =
@@ -2589,7 +2588,7 @@ impl ExtLsaStlvs {
             }
 
             // Parse Sub-TLV value.
-            let mut buf_stlv = buf.copy_to_bytes(stlv_wlen as usize);
+            let mut buf_stlv = buf.try_copy_to_bytes(stlv_wlen as usize)?;
             match stlv_etype {
                 Some(ExtLsaStlv::Ipv6FwdAddr) => {
                     let addr = buf_stlv.try_get_ipv6()?;
@@ -2806,7 +2805,7 @@ fn decode_16bit_addr(
             // As per RFC5838, fetch the address from the first four bytes and
             // ignore the rest.
             let addr = IpAddr::V4(buf.try_get_ipv4()?);
-            buf.advance(12);
+            buf.try_advance(12)?;
             Ok(addr)
         }
         AddressFamily::Ipv6 => Ok(IpAddr::V6(buf.try_get_ipv6()?)),
@@ -2862,5 +2861,5 @@ fn decode_prefix(
 fn encode_prefix(prefix: &IpNetwork, buf: &mut BytesMut) {
     let prefix_bytes = prefix.ip().bytes();
     let plen_wire = prefix_wire_len(prefix.prefix());
-    buf.put(&prefix_bytes[0..plen_wire]);
+    buf.put_slice(&prefix_bytes[0..plen_wire]);
 }

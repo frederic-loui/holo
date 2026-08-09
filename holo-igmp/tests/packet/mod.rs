@@ -5,12 +5,12 @@
 //
 use std::sync::LazyLock as Lazy;
 
-use bytes::Bytes;
 use const_addrs::ip4;
 use holo_igmp::packet::{
     IgmpV2Message, LeaveGroupV2, MembershipReportV2, Packet, PacketType,
 };
 use holo_protocol::assert_eq_hex;
+use holo_utils::bytes::Bytes;
 
 static MEMBERSHIPREQUEST1: Lazy<(Vec<u8>, Packet)> = Lazy::new(|| {
     (

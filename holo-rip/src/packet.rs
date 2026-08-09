@@ -7,8 +7,8 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use bytes::BytesMut;
 use derive_new::new;
+use holo_utils::bytes::BytesMut;
 use holo_utils::crypto::CryptoAlgo;
 use holo_utils::ip::{IpAddrKind, IpNetworkKind};
 use num_derive::FromPrimitive;

@@ -7,9 +7,8 @@
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
-use bytes::{Buf, Bytes, BytesMut};
 use derive_new::new;
-use holo_utils::bytes::TLS_BUF;
+use holo_utils::bytes::{Bytes, BytesMut, TLS_BUF};
 use holo_utils::ip::AddressFamily;
 use holo_utils::mpls::Label;
 use holo_utils::sr::Sid;
@@ -315,7 +314,7 @@ where
     // Decodes LSA from a bytes buffer.
     pub fn decode(af: AddressFamily, buf: &mut Bytes) -> DecodeResult<Self> {
         // Decode LSA header.
-        let buf_orig = buf.clone();
+        let mut buf_orig = buf.clone();
         if buf.remaining() < V::LsaHdr::LENGTH as usize {
             return Err(DecodeError::InvalidLength(buf.len() as u16));
         }
@@ -330,12 +329,12 @@ where
         if buf.remaining() < lsa_body_len as usize {
             return Err(DecodeError::InvalidLsaLength);
         }
-        let mut buf_lsa = buf.copy_to_bytes(lsa_body_len as usize);
+        let mut buf_lsa = buf.try_copy_to_bytes(lsa_body_len as usize)?;
         let body =
             V::LsaBody::decode(af, hdr.lsa_type(), hdr.lsa_id(), &mut buf_lsa)?;
 
         Ok(Lsa {
-            raw: buf_orig.slice(0..lsa_len as usize),
+            raw: buf_orig.try_copy_to_bytes(lsa_len as usize)?,
             hdr,
             body,
             base_time: lsa_base_time(),

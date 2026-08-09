@@ -9,8 +9,8 @@
 
 use std::borrow::Cow;
 
-use bytes::Bytes;
 use holo_northbound::notification;
+use holo_utils::bytes::Bytes;
 use holo_utils::option::OptionExt;
 use holo_yang::ToYang;
 use holo_yang::types::{Base64Str, Timeticks};

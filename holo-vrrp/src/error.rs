@@ -10,7 +10,7 @@
 use std::fmt::Debug;
 use std::net::IpAddr;
 
-use bytes::TryGetError;
+use holo_utils::bytes::TryGetError;
 use tracing::{error, warn};
 
 use crate::packet::DecodeError;

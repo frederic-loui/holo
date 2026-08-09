@@ -10,9 +10,8 @@
 use std::collections::BTreeSet;
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::mpls::Label;
 use holo_utils::sr::{IgpAlgoType, Sid};
 use num_traits::FromPrimitive;
@@ -429,7 +428,7 @@ impl FadStlv {
                 length = sstlv_len
             );
             let _span_guard = span.enter();
-            let mut buf_sstlv = buf.copy_to_bytes(sstlv_len as usize);
+            let mut buf_sstlv = buf.try_copy_to_bytes(sstlv_len as usize)?;
             match sstlv_etype {
                 Some(FadStlvType::ExcludeAdminGroup) => {
                     if sub_tlvs.exclude_admin_group.is_some() {

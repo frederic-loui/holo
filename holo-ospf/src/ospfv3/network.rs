@@ -6,8 +6,8 @@
 
 use std::net::Ipv6Addr;
 
-use bytes::Bytes;
 use const_addrs::ip6;
+use holo_utils::bytes::Bytes;
 use holo_utils::capabilities;
 use holo_utils::socket::{RawSocketExt, Socket};
 use ipnetwork::Ipv6Network;

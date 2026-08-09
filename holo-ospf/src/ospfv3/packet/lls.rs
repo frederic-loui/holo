@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
-use bytes::{Buf, Bytes, BytesMut};
+use holo_utils::bytes::{Bytes, BytesMut};
 use num_traits::FromPrimitive;
 
 use super::PacketHdrAuth;
@@ -118,7 +118,7 @@ impl LlsVersion<Self> for Ospfv3 {
         if block_len > buf.remaining() {
             return Err(DecodeError::InvalidLength(block_len as u16));
         }
-        buf = buf.slice(0..block_len);
+        buf.truncate(block_len);
 
         while buf.remaining() > 0 {
             // Parse TLV type.
@@ -133,7 +133,7 @@ impl LlsVersion<Self> for Ospfv3 {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(LlsTlvType::ExtendedOptionsFlags) => {
                     let opts =

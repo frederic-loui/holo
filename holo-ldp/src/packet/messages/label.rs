@@ -6,7 +6,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::ip::{
     AddressFamily, IpAddrExt, IpNetworkExt, Ipv4AddrExt, Ipv4NetworkExt,
     Ipv6AddrExt, Ipv6NetworkExt,
@@ -431,7 +431,7 @@ impl FecElem {
                 // FEC prefix (variable length).
                 let prefix_bytes = prefix.ip().bytes();
                 let plen_wire = prefix_wire_len(plen);
-                buf.put(&prefix_bytes[0..plen_wire]);
+                buf.put_slice(&prefix_bytes[0..plen_wire]);
             }
         }
     }

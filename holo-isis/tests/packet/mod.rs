@@ -13,10 +13,10 @@ mod snp;
 
 use std::sync::LazyLock as Lazy;
 
-use bytes::Bytes;
 use holo_isis::packet::auth::AuthMethod;
 use holo_isis::packet::pdu::Pdu;
 use holo_protocol::assert_eq_hex;
+use holo_utils::bytes::Bytes;
 use holo_utils::crypto::CryptoAlgo;
 use holo_utils::keychain::Key;
 

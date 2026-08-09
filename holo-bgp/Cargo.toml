@@ -11,7 +11,6 @@ twox-hash = { version = "2.0", optional = true }
 arbitrary.workspace = true
 arc-swap.workspace = true
 bitflags.workspace = true
-bytes.workspace = true
 chrono.workspace = true
 crossbeam-channel.workspace = true
 derive-new.workspace = true

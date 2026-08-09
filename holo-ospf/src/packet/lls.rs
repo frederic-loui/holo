@@ -5,7 +5,7 @@
 //
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use holo_utils::bytes::{Bytes, BytesMut};
 use internet_checksum::Checksum;
 use num_derive::{FromPrimitive, ToPrimitive};
 use serde::{self, Deserialize, Serialize};

@@ -10,9 +10,8 @@
 use std::net::Ipv4Addr;
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::mpls::Label;
 use holo_utils::sr::Sid;
 use num_traits::{FromPrimitive, ToPrimitive};
@@ -242,7 +241,7 @@ impl ExtAdminGroupStlv {
         }
 
         let len = stlv_len as usize;
-        Ok(ExtAdminGroupStlv(buf.copy_to_bytes(len).to_vec()))
+        Ok(ExtAdminGroupStlv(buf.try_copy_to_bytes(len)?.to_vec()))
     }
 
     pub(crate) fn encode(
@@ -706,7 +705,7 @@ impl AslaStlv {
         }
 
         // Parse sub-sub-TLVs.
-        let sub_tlvs = AslaStlvs::decode(buf);
+        let sub_tlvs = AslaStlvs::decode(buf)?;
 
         Ok(Some(AslaStlv {
             l_flag,
@@ -740,17 +739,17 @@ impl AslaStlv {
 // ===== impl AslaStlvs =====
 
 impl AslaStlvs {
-    pub(crate) fn decode(buf: &mut Bytes) -> Self {
+    pub(crate) fn decode(buf: &mut Bytes) -> TlvDecodeResult<Self> {
         let mut sub_tlvs = AslaStlvs::default();
 
         while buf.remaining() >= TLV_HDR_SIZE {
-            let stlv_type = buf.get_u8();
+            let stlv_type = buf.try_get_u8()?;
             let stlv_etype = AslaStlvType::from_u8(stlv_type);
-            let stlv_len = buf.get_u8();
+            let stlv_len = buf.try_get_u8()?;
             if stlv_len as usize > buf.remaining() {
                 break;
             }
-            let mut buf_stlv = buf.copy_to_bytes(stlv_len as usize);
+            let mut buf_stlv = buf.try_copy_to_bytes(stlv_len as usize)?;
             match stlv_etype {
                 Some(AslaStlvType::AdminGroup) => {
                     match AdminGroupStlv::decode(stlv_len, &mut buf_stlv) {
@@ -846,7 +845,7 @@ impl AslaStlvs {
             }
         }
 
-        sub_tlvs
+        Ok(sub_tlvs)
     }
 
     pub(crate) fn encode(&self, buf: &mut BytesMut) {

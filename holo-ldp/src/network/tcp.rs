@@ -9,14 +9,14 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::{Buf, BytesMut};
+use holo_utils::bytes::BytesMut;
 use holo_utils::capabilities;
 use holo_utils::socket::{
     OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, TcpConnInfo,
     TcpListener, TcpSocket, TcpSocketExt, TcpStream, TcpStreamExt,
 };
 use holo_utils::task::TimeoutTask;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
@@ -245,7 +245,7 @@ pub(crate) async fn nbr_read_loop(
 
     loop {
         // Read data from the network.
-        match stream.read_buf(&mut data).await {
+        match data.read_from(&mut stream).await {
             Ok(0) => {
                 // Notify that the connection was closed by the remote end.
                 let msg = NbrRxPduMsg {
@@ -266,7 +266,7 @@ pub(crate) async fn nbr_read_loop(
         while let Ok(pdu_size) = Pdu::get_pdu_size(&data, &cxt) {
             let pdu = Pdu::decode(&data[0..pdu_size], &cxt)
                 .map_err(|error| Error::NbrPduDecodeError(nbr_lsr_id, error));
-            data.advance(pdu_size);
+            data.try_advance(pdu_size).unwrap();
 
             // Notify that the LDP message was received.
             let msg = NbrRxPduMsg { nbr_id, pdu };

@@ -7,10 +7,9 @@
 use std::collections::{BTreeMap, btree_map};
 use std::net::Ipv4Addr;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
-use holo_utils::bytes::{BytesExt, BytesMutExt};
+use holo_utils::bytes::{Bytes, BytesMut};
 use holo_utils::mpls::Label;
 use holo_utils::sr::{IgpAlgoType, Sid};
 use ipnetwork::Ipv4Network;
@@ -365,7 +364,7 @@ impl LsaGrace {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(GraceTlvType::GracePeriod) => {
                     let period = GracePeriodTlv::decode(tlv_len, &mut buf_tlv)?;
@@ -450,7 +449,7 @@ impl LsaRouterInfo {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(RouterInfoTlvType::InformationalCaps) => {
                     let caps =
@@ -554,7 +553,7 @@ impl LsaExtPrefix {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtPrefixTlvType::ExtPrefix) => {
                     // Decode TLV.
@@ -606,7 +605,7 @@ impl LsaExtLink {
             }
 
             // Parse TLV value.
-            let mut buf_tlv = buf.copy_to_bytes(tlv_wlen as usize);
+            let mut buf_tlv = buf.try_copy_to_bytes(tlv_wlen as usize)?;
             match tlv_etype {
                 Some(ExtLinkTlvType::ExtLink) => {
                     // Decode TLV.
@@ -674,7 +673,7 @@ impl ExtPrefixTlv {
             }
 
             // Parse Sub-TLV value.
-            let mut buf_stlv = buf.copy_to_bytes(stlv_wlen as usize);
+            let mut buf_stlv = buf.try_copy_to_bytes(stlv_wlen as usize)?;
             match stlv_etype {
                 Some(ExtPrefixStlvType::PrefixSid) => {
                     let flags = buf_stlv.try_get_u8()?;
@@ -787,7 +786,7 @@ impl ExtLinkTlv {
             }
 
             // Parse Sub-TLV value.
-            let mut buf_stlv = buf.copy_to_bytes(stlv_wlen as usize);
+            let mut buf_stlv = buf.try_copy_to_bytes(stlv_wlen as usize)?;
             match stlv_etype {
                 Some(ExtLinkStlvType::LinkMsd) => {
                     let msds = MsdTlv::decode(stlv_len, &mut buf_stlv)?;
