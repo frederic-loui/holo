@@ -245,11 +245,7 @@ fn process_stmt_condition(
         PolicyCondition::MatchPrefixSet(value) => {
             let af = prefix.address_family();
             match match_sets.prefixes.get(&(value.clone(), af)) {
-                Some(set) => set.prefixes.iter().any(|range| {
-                    prefix.ip() == range.prefix.ip()
-                        && prefix.prefix() >= range.masklen_lower
-                        && prefix.prefix() <= range.masklen_upper
-                }),
+                Some(set) => set.matches(prefix),
                 None => false,
             }
         }

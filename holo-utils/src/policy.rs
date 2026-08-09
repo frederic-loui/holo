@@ -153,6 +153,20 @@ pub struct PrefixSet {
     pub prefixes: BTreeSet<IpPrefixRange>,
 }
 
+impl PrefixSet {
+    // Returns `true` if `prefix` matches any range in the set.
+    //
+    // A range matches when `prefix` is covered by the range's `ip-prefix`
+    // and its length falls within `[masklen_lower, masklen_upper]`.
+    pub fn matches(&self, prefix: &IpNetwork) -> bool {
+        self.prefixes.iter().any(|range| {
+            range.prefix.contains(prefix.ip())
+                && prefix.prefix() >= range.masklen_lower
+                && prefix.prefix() <= range.masklen_upper
+        })
+    }
+}
+
 // List of IPv4 or IPv6 neighbors that can be matched in a routing policy.
 #[derive(Clone, Debug)]
 #[derive(Deserialize, Serialize)]
@@ -839,5 +853,153 @@ impl BgpEqOperator {
             BgpEqOperator::LessThanOrEqual => *a <= *b,
             BgpEqOperator::GreaterThanOrEqual => *a >= *b,
         }
+    }
+}
+
+// ===== tests =====
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use const_addrs::net;
+
+    use super::*;
+
+    fn range(prefix: IpNetwork, lower: u8, upper: u8) -> IpPrefixRange {
+        IpPrefixRange {
+            prefix,
+            masklen_lower: lower,
+            masklen_upper: upper,
+        }
+    }
+
+    fn set_from(ranges: impl IntoIterator<Item = IpPrefixRange>) -> PrefixSet {
+        let mut prefixes = BTreeSet::new();
+        prefixes.extend(ranges);
+        PrefixSet {
+            name: "TEST".to_owned(),
+            mode: AddressFamily::Ipv4,
+            prefixes,
+        }
+    }
+
+    #[test]
+    fn exact_length_matches_only_that_length() {
+        let set = set_from([range(net!("192.0.2.0/24"), 24, 24)]);
+        assert!(set.matches(&net!("192.0.2.0/24")));
+        // Same covering prefix, different length — rejected by length bound.
+        assert!(!set.matches(&net!("192.0.2.0/25")));
+        // Sub-network with same length, different network-address — rejected.
+        assert!(!set.matches(&net!("192.0.2.0/26")));
+        // Completely unrelated network.
+        assert!(!set.matches(&net!("198.51.100.0/24")));
+    }
+
+    #[test]
+    fn range_accepts_covered_subprefixes() {
+        // `203.0.113.0/24 [24, 32]` must accept any prefix tree-wise
+        // covered by 203.0.113.0/24 whose length is in [24, 32].
+        let set = set_from([range(net!("203.0.113.0/24"), 24, 32)]);
+        assert!(set.matches(&net!("203.0.113.0/24")));
+        assert!(set.matches(&net!("203.0.113.0/25")));
+        assert!(set.matches(&net!("203.0.113.128/25")));
+        assert!(set.matches(&net!("203.0.113.0/26")));
+        assert!(set.matches(&net!("203.0.113.64/27")));
+        assert!(set.matches(&net!("203.0.113.1/32")));
+    }
+
+    #[test]
+    fn range_rejects_length_outside_bounds() {
+        let set = set_from([range(net!("203.0.113.0/24"), 26, 28)]);
+        // Length below `masklen_lower`.
+        assert!(!set.matches(&net!("203.0.113.0/24")));
+        assert!(!set.matches(&net!("203.0.113.0/25")));
+        // Length inside bounds.
+        assert!(set.matches(&net!("203.0.113.0/26")));
+        assert!(set.matches(&net!("203.0.113.0/27")));
+        assert!(set.matches(&net!("203.0.113.0/28")));
+        // Length above `masklen_upper`.
+        assert!(!set.matches(&net!("203.0.113.0/29")));
+        assert!(!set.matches(&net!("203.0.113.0/32")));
+    }
+
+    #[test]
+    fn range_rejects_supernets_and_disjoint_prefixes() {
+        let set = set_from([range(net!("203.0.113.0/24"), 8, 32)]);
+        // Supernet of the covering prefix — not contained.
+        assert!(!set.matches(&net!("203.0.0.0/16")));
+        assert!(!set.matches(&net!("203.0.112.0/23")));
+        // Sibling /24 at the same tree depth.
+        assert!(!set.matches(&net!("203.0.112.0/24")));
+        // Completely disjoint address space.
+        assert!(!set.matches(&net!("198.51.100.0/24")));
+    }
+
+    #[test]
+    fn multiple_entries_match_any() {
+        let set = set_from([
+            range(net!("192.0.2.0/24"), 24, 24),
+            range(net!("203.0.113.0/24"), 24, 32),
+        ]);
+        assert!(set.matches(&net!("192.0.2.0/24")));
+        assert!(set.matches(&net!("203.0.113.64/27")));
+        assert!(!set.matches(&net!("192.0.2.64/27")));
+        assert!(!set.matches(&net!("198.51.100.0/24")));
+    }
+
+    #[test]
+    fn ipv6_ranges_match_like_ipv4() {
+        let set = PrefixSet {
+            name: "TEST6".to_owned(),
+            mode: AddressFamily::Ipv6,
+            prefixes: [range(net!("2001:db8::/32"), 32, 128)]
+                .into_iter()
+                .collect(),
+        };
+        assert!(set.matches(&net!("2001:db8::/32")));
+        assert!(set.matches(&net!("2001:db8::/48")));
+        assert!(set.matches(&net!("2001:db8:1::/48")));
+        assert!(set.matches(&net!("2001:db8::1/128")));
+        assert!(!set.matches(&net!("2001:db9::/48")));
+        assert!(!set.matches(&net!("2001:db8::/31")));
+    }
+
+    #[test]
+    fn default_zero_prefix_matches_any_in_range() {
+        // `0.0.0.0/0 [0, 32]` is the "match any IPv4 prefix" pattern
+        // commonly used to redistribute everything of the configured
+        // address family.
+        let set = set_from([range(net!("0.0.0.0/0"), 0, 32)]);
+        assert!(set.matches(&net!("0.0.0.0/0")));
+        assert!(set.matches(&net!("10.0.0.0/8")));
+        assert!(set.matches(&net!("192.0.2.0/24")));
+        assert!(set.matches(&net!("198.51.100.1/32")));
+    }
+
+    #[test]
+    fn empty_prefix_set_never_matches() {
+        let set = PrefixSet {
+            name: "EMPTY".to_owned(),
+            mode: AddressFamily::Ipv4,
+            prefixes: BTreeSet::new(),
+        };
+        assert!(!set.matches(&net!("192.0.2.0/24")));
+        assert!(!set.matches(&net!("0.0.0.0/0")));
+    }
+
+    #[test]
+    fn non_canonical_anchor_is_interpreted_as_its_covering_network() {
+        // Holo's northbound does not canonicalize `ip-prefix` on
+        // ingest, so a configured range like `192.0.2.1/24` is stored
+        // verbatim with host bits set. Under containment semantics the
+        // stored anchor is interpreted as the covering network
+        // (`192.0.2.0/24`), because `IpNetwork::contains` masks the
+        // candidate before comparing. This test pins that behavior.
+        let set = set_from([range(net!("192.0.2.1/24"), 24, 32)]);
+        assert!(set.matches(&net!("192.0.2.0/24")));
+        assert!(set.matches(&net!("192.0.2.64/27")));
+        assert!(set.matches(&net!("192.0.2.255/32")));
+        assert!(!set.matches(&net!("198.51.100.0/24")));
     }
 }
