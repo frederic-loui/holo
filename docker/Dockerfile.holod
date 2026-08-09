@@ -34,9 +34,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:trixie-slim
 
 RUN groupadd -r holo
+RUN groupadd -r holoadm
 RUN useradd --system --shell /sbin/nologin --home-dir /var/opt/holo/ -g holo holo
-RUN mkdir -p /var/opt/holo
-RUN chown holo:holo /var/opt/holo
+RUN mkdir -p /var/opt/holo /var/log/holo
+RUN chown holo:holoadm /var/opt/holo /var/log/holo
+RUN chmod 0750 /var/opt/holo /var/log/holo
 
 COPY --from=build /usr/src/holo/holo-daemon/holod.toml /etc/holod.toml
 COPY --from=build /usr/src/holo/holod /usr/local/sbin/

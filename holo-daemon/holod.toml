@@ -1,6 +1,6 @@
-# User and group information
+# User and group holod runs as (members of @group get administrative access)
 user = "holo"
-group = "holo"
+group = "holoadm"
 
 # Path to the non-volatile memory storage for configuration transactions,
 # graceful-restart information, authentication sequence numbers, and more.
@@ -20,7 +20,7 @@ database_path = "/var/opt/holo/holo.db"
     # Enable or disable
     enabled = true
     # File path (needs to be writable by @user or @group)
-    dir = "/var/log/"
+    dir = "/var/log/holo"
     # File name
     name = "holod.log"
     # Log rotation (options: "never", "daily", "hourly")

@@ -137,7 +137,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             user: "holo".to_owned(),
-            group: "holo".to_owned(),
+            group: "holoadm".to_owned(),
             database_path: "/var/opt/holo/holo.db".to_owned(),
             logging: Default::default(),
             event_recorder: Default::default(),
@@ -160,7 +160,7 @@ impl Default for LoggingFile {
     fn default() -> LoggingFile {
         LoggingFile {
             enabled: true,
-            dir: "/var/log".to_owned(),
+            dir: "/var/log/holo".to_owned(),
             name: "holod.log".to_owned(),
             rotation: Default::default(),
             fmt: Default::default(),

@@ -13,14 +13,15 @@ use capctl::caps;
 use clap::{App, Arg};
 use config::{Config, LoggingFileRotation, LoggingFmtStyle};
 use nix::fcntl::{Flock, FlockArg};
-use nix::unistd::{Uid, User};
+use nix::sys::stat::{Mode, umask};
+use nix::unistd::{Group, Uid, User};
 use northbound::Northbound;
 use pickledb::{PickleDb, PickleDbDumpPolicy, SerializationMethod};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tracing::info;
 use tracing::level_filters::LevelFilter;
-use tracing_appender::rolling;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::*;
 
@@ -70,15 +71,23 @@ fn init_tracing(config: &config::Logging) {
 
     // Enable logging to a file.
     let file = config.file.enabled.then(|| {
-        let file_appender = match config.file.rotation {
-            LoggingFileRotation::Never => {
-                rolling::never(&config.file.dir, &config.file.name)
-            }
-            LoggingFileRotation::Hourly => {
-                rolling::hourly(&config.file.dir, &config.file.name)
-            }
-            LoggingFileRotation::Daily => {
-                rolling::daily(&config.file.dir, &config.file.name)
+        let rotation = match config.file.rotation {
+            LoggingFileRotation::Never => Rotation::NEVER,
+            LoggingFileRotation::Hourly => Rotation::HOURLY,
+            LoggingFileRotation::Daily => Rotation::DAILY,
+        };
+        let file_appender = RollingFileAppender::builder()
+            .rotation(rotation)
+            .filename_prefix(config.file.name.as_str())
+            .build(&config.file.dir);
+        let file_appender = match file_appender {
+            Ok(file_appender) => file_appender,
+            Err(error) => {
+                eprintln!(
+                    "failed to open the log file in {}: {error}",
+                    config.file.dir
+                );
+                std::process::exit(1);
             }
         };
 
@@ -162,14 +171,20 @@ fn init_db<P: AsRef<Path>>(
     }
 }
 
-fn privdrop(user: &str) -> nix::Result<()> {
+fn privdrop(user: &str, group: &str) -> nix::Result<()> {
     // Preserve set of permitted capabilities upon privdrop.
     capctl::prctl::set_securebits(capctl::prctl::Secbits::KEEP_CAPS).unwrap();
 
+    // The run-as group is configured independently of the user.
+    let Some(group) = Group::from_name(group)? else {
+        eprintln!("failed to find group {group}");
+        std::process::exit(1);
+    };
+
     // Drop to unprivileged user and group.
     if let Some(user) = User::from_name(user)? {
-        nix::unistd::setgroups(&[user.gid])?;
-        nix::unistd::setresgid(user.gid, user.gid, user.gid)?;
+        nix::unistd::setgroups(&[group.gid])?;
+        nix::unistd::setresgid(group.gid, group.gid, group.gid)?;
         nix::unistd::setresuid(user.uid, user.uid, user.uid)?;
     } else {
         eprintln!("failed to find user {user}");
@@ -258,8 +273,17 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Files created from here on are readable by @user and @group only.
+    umask(Mode::from_bits_truncate(0o027));
+
     // Ensure only one holod instance runs.
     let _lock = ensure_single_instance();
+
+    // Drop privileges.
+    if let Err(error) = privdrop(&config.user, &config.group) {
+        eprintln!("failed to drop root privileges: {error}");
+        std::process::exit(1);
+    }
 
     // Initialize tracing.
     init_tracing(&config.logging);
@@ -267,12 +291,6 @@ fn main() {
     // Initialize non-volatile storage.
     let db = init_db(&config.database_path)
         .expect("failed to initialize non-volatile storage");
-
-    // Drop privileges.
-    if let Err(error) = privdrop(&config.user) {
-        eprintln!("failed to drop root privileges: {error}");
-        std::process::exit(1);
-    }
 
     // We're ready to go!
     info!("starting up");

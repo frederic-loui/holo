@@ -31,14 +31,18 @@ $ cd ../holo-cli/
 $ cargo build --release
 ```
 
-5. Add `holo` user and group:
+5. Add the `holo` user, plus the `holo` and `holoadm` groups:
 
 ```sh
 # groupadd -r holo
-# mkdir /var/opt/holo
+# groupadd -r holoadm
 # useradd --system --shell /sbin/nologin --home-dir /var/opt/holo/ -g holo holo
-# chown holo:holo /var/opt/holo
+# mkdir /var/opt/holo /var/log/holo
+# chown holo:holoadm /var/opt/holo /var/log/holo
+# chmod 0750 /var/opt/holo /var/log/holo
 ```
+
+`holod` runs as the `holo` user and the `holoadm` group, so the log files and the database are group-owned by `holoadm`.
 
 6. Installation
 
