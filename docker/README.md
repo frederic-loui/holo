@@ -40,6 +40,20 @@ The `holo-bundle` build accepts two optional build arguments that specify which 
 - `HOLOD_IMAGE` (default: `ghcr.io/holo-routing/holod:latest`)
 - `HOLO_CLI_IMAGE` (default: `ghcr.io/holo-routing/holo-cli:latest`)
 
+### Build both images at once
+
+The `docker/build.sh` script runs both builds in sequence, layering `holo-bundle` on top of the `holod` image that was just built instead of the one published on the registry:
+```sh
+./docker/build.sh
+```
+
+The build profile defaults to `dev` and can be changed with the `--profile` argument:
+```sh
+./docker/build.sh --profile release
+```
+
+The resulting images are tagged `holod` and `holo-bundle`.
+
 # Running
 
 To run the container in the background, use the following command:
