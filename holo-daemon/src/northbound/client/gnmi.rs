@@ -174,6 +174,7 @@ impl proto::GNmi for GNmiService {
         grpc_request: Request<proto::SetRequest>,
     ) -> Result<Response<proto::SetResponse>, Status> {
         let yang_ctx = YANG_CTX.get().unwrap();
+        let author = grpc::request_author(&grpc_request);
         let grpc_request = grpc_request.into_inner();
         trace_span!("northbound").in_scope(|| {
             trace_span!("client", name = "gnmi").in_scope(|| {
@@ -235,6 +236,7 @@ impl proto::GNmi for GNmiService {
         // Convert and relay gNMI request to the northbound.
         let nb_request = api::client::CommitRequest {
             config: api::CommitConfiguration::Replace(candidate),
+            author,
             comment: Default::default(),
             confirmed_timeout: 0,
             responder: responder_tx,

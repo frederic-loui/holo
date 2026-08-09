@@ -74,6 +74,7 @@ pub mod client {
     #[derive(Debug)]
     pub struct CommitRequest {
         pub config: CommitConfiguration,
+        pub author: String,
         pub comment: String,
         pub confirmed_timeout: u32,
         pub responder: Responder<Result<CommitResponse>>,

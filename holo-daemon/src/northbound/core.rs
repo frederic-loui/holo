@@ -76,6 +76,9 @@ pub struct Transaction {
     #[serde(with = "chrono::serde::ts_seconds")]
     pub date: DateTime<Utc>,
 
+    // User that committed the transaction.
+    pub author: String,
+
     // Optional comment for the transaction.
     pub comment: String,
 
@@ -199,6 +202,7 @@ impl Northbound {
                 let response = self
                     .process_client_commit(
                         request.config,
+                        request.author,
                         request.comment,
                         request.confirmed_timeout,
                     )
@@ -270,6 +274,7 @@ impl Northbound {
     async fn process_client_commit(
         &mut self,
         config: capi::CommitConfiguration,
+        author: String,
         comment: String,
         confirmed_timeout: u32,
     ) -> Result<capi::client::CommitResponse> {
@@ -296,7 +301,7 @@ impl Northbound {
 
         // Create configuration transaction.
         let transaction_id = self
-            .create_transaction(candidate, comment, confirmed_timeout)
+            .create_transaction(candidate, author, comment, confirmed_timeout)
             .await?;
         Ok(capi::client::CommitResponse { transaction_id })
     }
@@ -375,7 +380,12 @@ impl Northbound {
         let comment = "Confirmed commit rollback".to_owned();
         let rollback = self.confirmed_commit.rollback.take().unwrap();
         if let Err(error) = self
-            .create_transaction(rollback.configuration, comment, 0)
+            .create_transaction(
+                rollback.configuration,
+                String::new(),
+                comment,
+                0,
+            )
             .await
         {
             error!(%error, "failed to rollback to previous configuration");
@@ -390,6 +400,7 @@ impl Northbound {
     async fn create_transaction(
         &mut self,
         candidate: DataTree<'static>,
+        author: String,
         comment: String,
         confirmed_timeout: u32,
     ) -> Result<u32> {
@@ -461,7 +472,7 @@ impl Northbound {
                 // Create transaction structure.
                 let candidate = Arc::try_unwrap(candidate).unwrap();
                 let mut transaction =
-                    Transaction::new(Utc::now(), comment, candidate);
+                    Transaction::new(Utc::now(), author, comment, candidate);
 
                 // Record transaction.
                 let mut db = self.db.lock().unwrap();

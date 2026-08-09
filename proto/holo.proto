@@ -244,8 +244,11 @@ message ListTransactionsResponse {
   // Date and time the transaction was committed.
   string date = 2;
 
+  // User that committed the transaction.
+  string author = 3;
+
   // Comment assigned to the transaction.
-  string comment = 3;
+  string comment = 4;
 }
 
 //

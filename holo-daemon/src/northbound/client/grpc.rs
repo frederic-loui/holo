@@ -17,13 +17,14 @@ use holo_utils::auth::Users;
 use holo_utils::task::Task;
 use holo_yang::{YANG_CTX, YANG_FEATURES};
 use nix::sys::stat::{Mode, fchmod};
+use nix::unistd::{Uid, User};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::wrappers::{UnboundedReceiverStream, UnixListenerStream};
 use tonic::metadata::MetadataMap;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::server::Router;
+use tonic::transport::server::{Router, UdsConnectInfo};
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use tracing::{trace, trace_span};
@@ -52,6 +53,10 @@ pub(crate) struct Authenticator {
     users: watch::Receiver<Users>,
     unix: bool,
 }
+
+// User name a request was authenticated with.
+#[derive(Clone, Debug)]
+struct AuthenticatedUser(String);
 
 // Where a server accepts connections.
 #[derive(Debug)]
@@ -298,6 +303,7 @@ impl proto::Northbound for NorthboundService {
         &self,
         grpc_request: Request<proto::CommitRequest>,
     ) -> Result<Response<proto::CommitResponse>, Status> {
+        let author = request_author(&grpc_request);
         let grpc_request = grpc_request.into_inner();
         trace_span!("northbound").in_scope(|| {
             trace_span!("client", name = "grpc").in_scope(|| {
@@ -335,6 +341,7 @@ impl proto::Northbound for NorthboundService {
         let nb_request =
             api::client::Request::Commit(api::client::CommitRequest {
                 config,
+                author,
                 comment: grpc_request.comment,
                 confirmed_timeout: grpc_request.confirmed_timeout,
                 responder: responder_tx,
@@ -426,8 +433,9 @@ impl proto::Northbound for NorthboundService {
             nb_response.transactions.into_iter().map(|transaction| {
                 Ok(proto::ListTransactionsResponse {
                     id: transaction.id,
-                    comment: transaction.comment,
                     date: transaction.date.to_string(),
+                    author: transaction.author,
+                    comment: transaction.comment,
                 })
             });
 
@@ -534,19 +542,24 @@ impl Authenticator {
     // user.
     pub(crate) fn intercept(
         &self,
-        request: Request<()>,
+        mut request: Request<()>,
     ) -> Result<Request<()>, Status> {
-        self.authenticate(request.metadata())?;
+        if let Some(user) = self.authenticate(request.metadata())? {
+            request.extensions_mut().insert(AuthenticatedUser(user));
+        }
 
         Ok(request)
     }
 
-    fn authenticate(&self, metadata: &MetadataMap) -> Result<(), Status> {
+    fn authenticate(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<Option<String>, Status> {
         // The socket's file permissions already decide who may connect, and
         // the peer's identity comes from the kernel, so no password is asked
         // for.
         if self.unix {
-            return Ok(());
+            return Ok(None);
         }
 
         let Some((username, password)) = credentials(metadata) else {
@@ -563,7 +576,7 @@ impl Authenticator {
             return Err(Status::unauthenticated("invalid credentials"));
         }
 
-        Ok(())
+        Ok(Some(username.to_owned()))
     }
 }
 
@@ -811,6 +824,40 @@ fn unix_listener(path: &FsPath) -> std::io::Result<UnixListenerStream> {
 }
 
 // ===== global functions =====
+
+// Identifies who issued a request.
+//
+// A Unix socket carries the peer's credentials, so its user comes from the
+// kernel and is prefixed with "unix:". A remote request is attributed to the
+// user it authenticated as, qualified by the address it came from.
+pub(crate) fn request_author<T>(request: &Request<T>) -> String {
+    const UNKNOWN: &str = "unknown";
+
+    if let Some(info) = request.extensions().get::<UdsConnectInfo>() {
+        let user = match info.peer_cred {
+            Some(cred) => {
+                let uid = Uid::from_raw(cred.uid());
+                User::from_uid(uid)
+                    .ok()
+                    .flatten()
+                    .map(|user| user.name)
+                    .unwrap_or_else(|| format!("uid:{uid}"))
+            }
+            None => UNKNOWN.to_owned(),
+        };
+        return format!("unix:{user}");
+    }
+
+    let user = request
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .map(|user| user.0.as_str())
+        .unwrap_or(UNKNOWN);
+    match request.remote_addr() {
+        Some(address) => format!("{user}@{}", address.ip()),
+        None => user.to_owned(),
+    }
+}
 
 // Sets up the listener and the server for the given address.
 //
