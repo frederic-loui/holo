@@ -27,6 +27,7 @@ prefix-trie.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha-crypt.workspace = true
 socket2.workspace = true
 tokio.workspace = true
 tracing.workspace = true

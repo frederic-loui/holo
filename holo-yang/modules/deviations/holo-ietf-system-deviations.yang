@@ -18,6 +18,14 @@ module holo-ietf-system-deviations {
    * Not supported nodes
    */
 
+  deviation "/sys:system/sys:authentication/sys:user-authentication-order" {
+    deviate not-supported;
+  }
+
+  deviation "/sys:system/sys:authentication/sys:user/sys:authorized-key" {
+    deviate not-supported;
+  }
+
   deviation "/sys:system/sys:clock" {
     deviate not-supported;
   }

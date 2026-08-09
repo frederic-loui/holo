@@ -33,6 +33,8 @@ pub struct Master {
     pub config: SystemCfg,
     // Hostname subscriptions.
     pub hostname_subscriptions: HashMap<usize, IbusSender>,
+    // Local user subscriptions.
+    pub users_subscriptions: HashMap<usize, IbusSender>,
 }
 
 #[derive(Debug)]
@@ -133,6 +135,7 @@ pub fn start(
             ibus_tx,
             config: Default::default(),
             hostname_subscriptions: Default::default(),
+            users_subscriptions: Default::default(),
         };
 
         // Run task main loop.

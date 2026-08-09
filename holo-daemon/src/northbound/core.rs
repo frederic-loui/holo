@@ -16,6 +16,8 @@ use holo_northbound::configuration::{
 };
 use holo_northbound::{NbDaemonSender, NbProviderReceiver, Path, api as papi};
 use holo_protocol::InstanceShared;
+use holo_utils::auth::Users;
+use holo_utils::ibus::IbusMsg;
 use holo_utils::task::{Task, TimeoutTask};
 use holo_utils::yang::{ContextExt, SchemaNodeExt};
 use holo_utils::{Database, ibus};
@@ -24,7 +26,7 @@ use holo_yang::YANG_CTX;
 use pickledb::PickleDb;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, error, info, instrument, trace, warn};
 use yang5::data::{
     Data, DataDiffFlags, DataFormat, DataPrinterFlags, DataTree,
@@ -115,12 +117,16 @@ impl Northbound {
         let yang_ctx = YANG_CTX.get().unwrap();
         let running_config = Arc::new(DataTree::new(yang_ctx));
 
-        // Start client tasks (e.g. gRPC, gNMI).
-        let (rx_clients, clients) = start_clients(config);
-
         // Start provider tasks (e.g. interfaces, routing, etc).
+        let (ibus_tx, ibus_rx) = ibus::ibus_channels();
         let (rx_providers, providers, registered_paths, validation_fns) =
-            start_providers(config, db.clone());
+            start_providers(config, db.clone(), &ibus_tx, ibus_rx);
+
+        // Track the local users the northbound clients authenticate against.
+        let users = start_users_watch(&ibus_tx);
+
+        // Start client tasks (e.g. gRPC, gNMI).
+        let (rx_clients, clients) = start_clients(config, users);
 
         // Resolve the data provider that owns each configuration node.
         let provider_paths = resolve_provider_paths(&registered_paths);
@@ -655,6 +661,8 @@ impl Default for ConfirmedCommit {
 fn start_providers(
     config: &Config,
     db: Database,
+    ibus_tx: &ibus::IbusChannelsTx,
+    ibus_rx: ibus::IbusChannelsRx,
 ) -> (
     NbProviderReceiver,
     Vec<NbDaemonSender>,
@@ -665,7 +673,6 @@ fn start_providers(
     let mut registered_paths = HashMap::new();
     let mut validation_fns = Vec::new();
     let (provider_tx, provider_rx) = mpsc::unbounded_channel();
-    let (ibus_tx, ibus_rx) = ibus::ibus_channels();
     let shared = InstanceShared {
         db: Some(db),
         event_recorder_config: Some(config.event_recorder.clone()),
@@ -677,7 +684,7 @@ fn start_providers(
     {
         let daemon_tx = holo_interface::start(
             provider_tx.clone(),
-            &ibus_tx,
+            ibus_tx,
             ibus_rx.interface,
             shared.clone(),
         );
@@ -694,7 +701,7 @@ fn start_providers(
     {
         let daemon_tx = holo_keychain::start(
             provider_tx.clone(),
-            &ibus_tx,
+            ibus_tx,
             ibus_rx.keychain,
         );
         register_provider::<holo_keychain::Master>(
@@ -709,7 +716,7 @@ fn start_providers(
     #[cfg(feature = "policy")]
     {
         let daemon_tx =
-            holo_policy::start(provider_tx.clone(), &ibus_tx, ibus_rx.policy);
+            holo_policy::start(provider_tx.clone(), ibus_tx, ibus_rx.policy);
         register_provider::<holo_policy::Master>(
             providers.len(),
             &mut registered_paths,
@@ -722,7 +729,7 @@ fn start_providers(
     #[cfg(feature = "system")]
     {
         let daemon_tx =
-            holo_system::start(provider_tx.clone(), &ibus_tx, ibus_rx.system);
+            holo_system::start(provider_tx.clone(), ibus_tx, ibus_rx.system);
         register_provider::<holo_system::Master>(
             providers.len(),
             &mut registered_paths,
@@ -735,7 +742,7 @@ fn start_providers(
     #[cfg(feature = "routing")]
     {
         let daemon_tx =
-            holo_routing::start(provider_tx, &ibus_tx, ibus_rx.routing, shared);
+            holo_routing::start(provider_tx, ibus_tx, ibus_rx.routing, shared);
         register_provider::<holo_routing::Master>(
             providers.len(),
             &mut registered_paths,
@@ -750,6 +757,7 @@ fn start_providers(
 // Starts external clients.
 fn start_clients(
     config: &Config,
+    users: watch::Receiver<Users>,
 ) -> (Receiver<capi::client::Request>, Vec<Task<()>>) {
     let mut clients = Vec::new();
     let (client_tx, daemon_rx) = mpsc::channel(4);
@@ -757,18 +765,43 @@ fn start_clients(
     // Spawn gRPC task.
     let grpc_config = &config.plugins.grpc;
     if grpc_config.enabled {
-        let client = grpc::start(grpc_config, client_tx.clone());
-        clients.push(client);
+        clients.extend(grpc::start(
+            grpc_config,
+            client_tx.clone(),
+            users.clone(),
+        ));
     }
 
     // Spawn gNMI task.
     let gnmi_config = &config.plugins.gnmi;
     if gnmi_config.enabled {
-        let client = gnmi::start(gnmi_config, client_tx);
-        clients.push(client);
+        clients.extend(gnmi::start(gnmi_config, client_tx, users));
     }
 
     (daemon_rx, clients)
+}
+
+// Mirrors the local users, which holo-system publishes over the internal bus,
+// so that the northbound plugins can authenticate incoming requests.
+fn start_users_watch(ibus_tx: &ibus::IbusChannelsTx) -> watch::Receiver<Users> {
+    let (users_tx, users_rx) = watch::channel(Users::default());
+    let (notif_tx, mut notif_rx) = mpsc::unbounded_channel();
+    let ibus_tx = ibus::IbusChannelsTx::with_client(ibus_tx, notif_tx);
+    ibus_tx.auth_users_sub();
+
+    let mut task = Task::spawn(async move {
+        // Hold the connection open for as long as the task runs.
+        let _ibus_tx = ibus_tx;
+
+        while let Some(msg) = notif_rx.recv().await {
+            if let IbusMsg::AuthUsersUpdate(users) = msg {
+                let _ = users_tx.send(users);
+            }
+        }
+    });
+    task.detach();
+
+    users_rx
 }
 
 // Registers the YANG paths and validation functions of a data provider.

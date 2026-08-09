@@ -392,6 +392,10 @@ pub static YANG_FEATURES: Lazy<HashMap<&'static str, Vec<&'static str>>> =
                 "route-refresh",
                 "ttl-security",
             ],
+            "iana-crypt-hash" => vec![
+                "crypt-hash-sha-256",
+                "crypt-hash-sha-512",
+            ],
             "ietf-bfd-types" => vec![
                 "client-base-cfg-parms",
                 "single-minimum-interval",
@@ -445,6 +449,10 @@ pub static YANG_FEATURES: Lazy<HashMap<&'static str, Vec<&'static str>>> =
             ],
             "ietf-segment-routing-common" => vec![
                 "sid-last-hop-behavior",
+            ],
+            "ietf-system" => vec![
+                "authentication",
+                "local-users",
             ],
             "ietf-vrrp" => vec![
                 "validate-interval-errors",

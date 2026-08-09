@@ -91,7 +91,7 @@ pub struct Plugins {
 #[serde(default, deny_unknown_fields)]
 pub struct Grpc {
     pub enabled: bool,
-    pub address: String,
+    pub address: Vec<String>,
     pub tls: Tls,
 }
 
@@ -99,14 +99,13 @@ pub struct Grpc {
 #[serde(default, deny_unknown_fields)]
 pub struct Gnmi {
     pub enabled: bool,
-    pub address: String,
+    pub address: Vec<String>,
     pub tls: Tls,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tls {
-    pub enabled: bool,
     pub certificate: String,
     pub key: String,
 }
@@ -198,7 +197,7 @@ impl Default for Grpc {
     fn default() -> Grpc {
         Grpc {
             enabled: true,
-            address: "/var/opt/holo/holod.sock".to_owned(),
+            address: vec!["/var/opt/holo/holod.sock".to_owned()],
             tls: Default::default(),
         }
     }
@@ -209,8 +208,8 @@ impl Default for Grpc {
 impl Default for Gnmi {
     fn default() -> Gnmi {
         Gnmi {
-            enabled: true,
-            address: "0.0.0.0:9339".to_owned(),
+            enabled: false,
+            address: vec!["0.0.0.0:9339".to_owned()],
             tls: Default::default(),
         }
     }
@@ -221,9 +220,8 @@ impl Default for Gnmi {
 impl Default for Tls {
     fn default() -> Tls {
         Tls {
-            enabled: false,
-            certificate: "/etc/ssl/private/holo.pem".to_owned(),
-            key: "/etc/ssl/certs/holo.key".to_owned(),
+            certificate: "/etc/holo/holo.pem".to_owned(),
+            key: "/etc/holo/holo.key".to_owned(),
         }
     }
 }

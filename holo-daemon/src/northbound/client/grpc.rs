@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
+use std::error::Error as _;
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
 use std::path::{Path as FsPath, PathBuf};
@@ -12,17 +13,20 @@ use std::time::SystemTime;
 
 use futures::Stream;
 use holo_northbound::{Path, PathElem};
+use holo_utils::auth::Users;
 use holo_utils::task::Task;
 use holo_yang::{YANG_CTX, YANG_FEATURES};
 use nix::sys::stat::{Mode, fchmod};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::wrappers::{UnboundedReceiverStream, UnixListenerStream};
+use tonic::metadata::MetadataMap;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::Router;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
-use tracing::{error, trace, trace_span};
+use tracing::{trace, trace_span};
 use yang5::data::{
     Data, DataDiff, DataFormat, DataOperation, DataParserFlags,
     DataPrinterFlags, DataTree, DataValidationFlags,
@@ -40,6 +44,13 @@ mod proto {
 
 struct NorthboundService {
     request_tx: Sender<api::client::Request>,
+}
+
+// Authenticates northbound clients against the configured local users.
+#[derive(Clone, Debug)]
+pub(crate) struct Authenticator {
+    users: watch::Receiver<Users>,
+    unix: bool,
 }
 
 // Where a server accepts connections.
@@ -507,6 +518,55 @@ impl proto::Northbound for NorthboundService {
     }
 }
 
+// ===== impl Authenticator =====
+
+impl Authenticator {
+    pub(crate) fn new(
+        users: watch::Receiver<Users>,
+        listener: &Listener,
+    ) -> Authenticator {
+        let unix = matches!(listener, Listener::Unix(_));
+
+        Authenticator { users, unix }
+    }
+
+    // Rejects the request unless it carries the credentials of a configured
+    // user.
+    pub(crate) fn intercept(
+        &self,
+        request: Request<()>,
+    ) -> Result<Request<()>, Status> {
+        self.authenticate(request.metadata())?;
+
+        Ok(request)
+    }
+
+    fn authenticate(&self, metadata: &MetadataMap) -> Result<(), Status> {
+        // The socket's file permissions already decide who may connect, and
+        // the peer's identity comes from the kernel, so no password is asked
+        // for.
+        if self.unix {
+            return Ok(());
+        }
+
+        let Some((username, password)) = credentials(metadata) else {
+            return Err(Status::unauthenticated("missing credentials"));
+        };
+
+        // The same error covers an unknown user and a wrong password, so that
+        // valid user names can't be harvested.
+        let users = self.users.borrow().clone();
+        if !users
+            .get(username)
+            .is_some_and(|user| user.verify_password(password))
+        {
+            return Err(Status::unauthenticated("invalid credentials"));
+        }
+
+        Ok(())
+    }
+}
+
 // ===== impl Status =====
 
 impl From<northbound::Error> for Status {
@@ -593,6 +653,13 @@ fn read_pem(path: &str, name: &str) -> Vec<u8> {
             std::process::exit(1);
         }
     }
+}
+
+fn credentials(metadata: &MetadataMap) -> Option<(&str, &str)> {
+    let username = metadata.get("username")?.to_str().ok()?;
+    let password = metadata.get("password")?.to_str().ok()?;
+
+    Some((username, password))
 }
 
 fn get_timestamp() -> i64 {
@@ -747,7 +814,9 @@ fn unix_listener(path: &FsPath) -> std::io::Result<UnixListenerStream> {
 
 // Sets up the listener and the server for the given address.
 //
-// An address starting with a slash is taken as the path of a Unix socket.
+// An address starting with a slash is taken as the path of a Unix socket,
+// which is protected by its file permissions. A TCP address requires TLS, as
+// credentials would otherwise cross the network in the clear.
 pub(crate) fn server_init(
     name: &str,
     address: &str,
@@ -758,15 +827,15 @@ pub(crate) fn server_init(
         false => match address.parse::<SocketAddr>() {
             Ok(address) => Listener::Tcp(address),
             Err(error) => {
-                error!(%error, "failed to parse {name} server address");
+                eprintln!("failed to parse the {name} server address: {error}");
                 std::process::exit(1);
             }
         },
     };
 
     let server = Server::builder();
-    let server = match tls.enabled {
-        true => {
+    let server = match &listener {
+        Listener::Tcp(_) => {
             let cert = read_pem(&tls.certificate, "TLS certificate");
             let key = read_pem(&tls.key, "TLS key");
             let identity = Identity::from_pem(cert, key);
@@ -774,12 +843,12 @@ pub(crate) fn server_init(
             match server.tls_config(tls_config) {
                 Ok(server) => server,
                 Err(error) => {
-                    error!(%error, "failed to setup {name} TLS");
+                    eprintln!("failed to setup {name} TLS: {error}");
                     std::process::exit(1);
                 }
             }
         }
-        false => server,
+        Listener::Unix(_) => server,
     };
 
     (listener, server)
@@ -787,18 +856,32 @@ pub(crate) fn server_init(
 
 // Binds the listener and serves requests, terminating the daemon on failure.
 pub(crate) async fn serve(name: &str, listener: Listener, router: Router) {
-    let result = match listener {
-        Listener::Tcp(address) => router.serve(address).await,
-        Listener::Unix(path) => match unix_listener(&path) {
+    let result = match &listener {
+        Listener::Tcp(address) => router.serve(*address).await,
+        Listener::Unix(path) => match unix_listener(path) {
             Ok(incoming) => router.serve_with_incoming(incoming).await,
             Err(error) => {
-                error!(%error, path = %path.display(), "failed to bind {name} socket");
+                eprintln!(
+                    "failed to bind the {name} socket {}: {error}",
+                    path.display()
+                );
                 std::process::exit(1);
             }
         },
     };
     if let Err(error) = result {
-        error!(%error, "failed to start {name} service");
+        let address = match &listener {
+            Listener::Tcp(address) => address.to_string(),
+            Listener::Unix(path) => path.display().to_string(),
+        };
+        let mut message =
+            format!("failed to start the {name} service on {address}: {error}");
+        let mut source = error.source();
+        while let Some(error) = source {
+            message += &format!(": {error}");
+            source = error.source();
+        }
+        eprintln!("{message}");
         std::process::exit(1);
     }
 }
@@ -806,17 +889,28 @@ pub(crate) async fn serve(name: &str, listener: Listener, router: Router) {
 pub(crate) fn start(
     config: &config::Grpc,
     request_tx: Sender<api::client::Request>,
-) -> Task<()> {
-    let (listener, mut server) =
-        server_init("gRPC", &config.address, &config.tls);
-    let service = NorthboundService { request_tx };
-    let router = server.add_service(
-        proto::NorthboundServer::new(service)
-            .max_encoding_message_size(usize::MAX)
-            .max_decoding_message_size(usize::MAX),
-    );
+    users: watch::Receiver<Users>,
+) -> Vec<Task<()>> {
+    config
+        .address
+        .iter()
+        .map(|address| {
+            let (listener, mut server) =
+                server_init("gRPC", address, &config.tls);
+            let auth = Authenticator::new(users.clone(), &listener);
+            let service = NorthboundService {
+                request_tx: request_tx.clone(),
+            };
+            let router = server.add_service(InterceptedService::new(
+                proto::NorthboundServer::new(service)
+                    .max_encoding_message_size(usize::MAX)
+                    .max_decoding_message_size(usize::MAX),
+                move |request| auth.intercept(request),
+            ));
 
-    Task::spawn(async move {
-        serve("gRPC", listener, router).await;
-    })
+            Task::spawn(async move {
+                serve("gRPC", listener, router).await;
+            })
+        })
+        .collect()
 }

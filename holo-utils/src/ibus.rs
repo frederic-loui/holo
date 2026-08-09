@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::auth::Users;
 use crate::bfd;
 use crate::bier::{BierCfg, BierCfgEvent};
 use crate::ip::AddressFamily;
@@ -110,6 +111,10 @@ pub type IbusConnStream = BoxStream<'static, (IbusClientId, IbusConnEvent)>;
 #[derive(Clone, Debug)]
 #[derive(Deserialize, Serialize)]
 pub enum IbusMsg {
+    /// Request a subscription to local user update notifications.
+    AuthUsersSub {},
+    /// Local user update notification.
+    AuthUsersUpdate(Users),
     /// BFD peer registration.
     BfdSessionReg {
         #[serde(skip)]
@@ -248,6 +253,11 @@ impl IbusChannelsTx {
             keychain: tx.keychain.connect(&client),
             policy: tx.policy.connect(&client),
         }
+    }
+
+    /// Sends an [`IbusMsg::AuthUsersSub`] message to `holo-system`.
+    pub fn auth_users_sub(&self) {
+        self.system.send(IbusMsg::AuthUsersSub {});
     }
 
     /// Sends an [`IbusMsg::BfdSessionReg`] message to `holo-routing`.

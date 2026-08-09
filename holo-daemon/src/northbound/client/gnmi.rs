@@ -7,12 +7,14 @@
 use std::time::SystemTime;
 
 use holo_northbound::{Path, PathElem};
+use holo_utils::auth::Users;
 use holo_utils::task::Task;
 use holo_yang::YANG_CTX;
 use itertools::join;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::service::interceptor::InterceptedService;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{trace, trace_span};
 use yang5::data::{Data, DataFormat, DataPrinterFlags, DataTree};
@@ -507,17 +509,28 @@ fn get_timestamp() -> i64 {
 pub(crate) fn start(
     config: &config::Gnmi,
     request_tx: Sender<api::client::Request>,
-) -> Task<()> {
-    let (listener, mut server) =
-        grpc::server_init("gNMI", &config.address, &config.tls);
-    let service = GNmiService { request_tx };
-    let router = server.add_service(
-        proto::GNmiServer::new(service)
-            .max_encoding_message_size(usize::MAX)
-            .max_decoding_message_size(usize::MAX),
-    );
+    users: watch::Receiver<Users>,
+) -> Vec<Task<()>> {
+    config
+        .address
+        .iter()
+        .map(|address| {
+            let (listener, mut server) =
+                grpc::server_init("gNMI", address, &config.tls);
+            let auth = grpc::Authenticator::new(users.clone(), &listener);
+            let service = GNmiService {
+                request_tx: request_tx.clone(),
+            };
+            let router = server.add_service(InterceptedService::new(
+                proto::GNmiServer::new(service)
+                    .max_encoding_message_size(usize::MAX)
+                    .max_decoding_message_size(usize::MAX),
+                move |request| auth.intercept(request),
+            ));
 
-    Task::spawn(async move {
-        grpc::serve("gNMI", listener, router).await;
-    })
+            Task::spawn(async move {
+                grpc::serve("gNMI", listener, router).await;
+            })
+        })
+        .collect()
 }
