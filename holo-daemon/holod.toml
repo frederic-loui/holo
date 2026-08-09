@@ -76,7 +76,7 @@ database_path = "/var/opt/holo/holo.db"
     # Enable or disable the plugin
     enabled = true
     # gNMI server listening address
-    address = "0.0.0.0:10161"
+    address = "0.0.0.0:9339"
     # Optional gNMI TLS configuration
     [plugins.gnmi.tls]
       # Enable or disable TLS authentication
